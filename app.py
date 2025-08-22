@@ -40,6 +40,130 @@ page = st.sidebar.radio(
     "Choose function",
     ["TPD Draft", "TNMM Review", "CUT/CUP Review", "Information Request List", "Advisory / Opportunity Spotting"],
 )
+# ---- PwC theming (drop this right after st.set_page_config) ----
+PWC_COLORS = {
+    "primary": "#FD5108",   # bold signature orange
+    "orange1": "#D85604",
+    "orange2": "#E88D14",
+    "yellow":  "#F3BE26",
+    "red1":    "#AD1B02",
+    "red2":    "#E0301E",
+    "pink":    "#E669A2",
+    "black":   "#000000",
+    "grey1":   "#2D2D2D",
+    "grey2":   "#7D7D7D",
+    "grey3":   "#DEDEDE",
+}
+
+st.markdown(f"""
+<style>
+/* Page background & typography */
+:root {{
+  --pwc-primary: {PWC_COLORS["primary"]};
+  --pwc-orange1: {PWC_COLORS["orange1"]};
+  --pwc-orange2: {PWC_COLORS["orange2"]};
+  --pwc-yellow:  {PWC_COLORS["yellow"]};
+  --pwc-red:     {PWC_COLORS["red2"]};
+  --pwc-pink:    {PWC_COLORS["pink"]};
+  --pwc-black:   {PWC_COLORS["black"]};
+  --pwc-grey1:   {PWC_COLORS["grey1"]};
+  --pwc-grey2:   {PWC_COLORS["grey2"]};
+  --pwc-grey3:   {PWC_COLORS["grey3"]};
+}}
+
+html, body, [data-testid="stAppViewContainer"] {{
+  background: linear-gradient(180deg, #ffffff 0%, #fff9f3 60%, #fff6e8 100%);
+  color: var(--pwc-grey1);
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+}}
+
+[data-testid="stHeader"] {{ background: transparent; }}
+
+.sidebar .sidebar-content {{ background: #ffffff00; }}
+
+section.main > div:has(> .block-container) {{
+  padding-top: 0.5rem;
+}}
+
+.block-container {{
+  padding-top: 1rem;
+}}
+
+h1, h2, h3 {{
+  letter-spacing: .2px;
+}}
+h1 {{ color: var(--pwc-primary); }}
+h2 {{ color: var(--pwc-red); }}
+h3 {{ color: var(--pwc-orange2); }}
+
+/* PwC header bar */
+.pwc-topbar {{
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  border-radius: 14px;
+  padding: .85rem 1rem;
+  margin: .25rem 0 1rem;
+  background: linear-gradient(90deg, var(--pwc-primary), var(--pwc-orange2));
+  color: white;
+  box-shadow: 0 8px 24px rgba(0,0,0,.08);
+}}
+.pwc-badge {{
+  background: rgba(255,255,255,.12);
+  border: 1px solid rgba(255,255,255,.25);
+  padding: .15rem .5rem;
+  border-radius: 999px;
+  font-size: .75rem;
+}}
+/* Buttons */
+.stButton>button {{
+  background: var(--pwc-primary);
+  color: #fff;
+  border-radius: 12px;
+  border: none;
+  box-shadow: 0 6px 16px rgba(253, 81, 8, .25);
+}}
+.stButton>button:hover {{
+  background: var(--pwc-orange1);
+}}
+/* Widgets */
+.stTextInput>div>div>input,
+.stTextArea textarea,
+.stNumberInput input {{
+  border-radius: 10px !important;
+  border: 1px solid var(--pwc-grey3);
+}}
+/* Dataframes */
+[data-testid="stTable"], .stDataFrame {{
+  border: 1px solid var(--pwc-grey3);
+  border-radius: 12px;
+}}
+/* Pills/tags */
+.pwc-pill {{
+  display: inline-block;
+  padding: .15rem .5rem;
+  border-radius: 999px;
+  font-size: .75rem;
+  color: #fff;
+  background: var(--pwc-red);
+}}
+</style>
+""", unsafe_allow_html=True)
+
+# Optional: branded header on every page
+st.markdown(
+    """
+    <div class="pwc-topbar">
+      <div style="width:16px;height:16px;border-radius:3px;background:white;opacity:.95"></div>
+      <div style="width:12px;height:12px;border-radius:3px;background:#FFD27A;opacity:.95"></div>
+      <div style="width:20px;height:20px;border-radius:3px;background:#FF9151;opacity:.95"></div>
+      <strong style="margin-left:.25rem">TPA — Transfer Pricing Associate</strong>
+      <span class="pwc-badge">demo</span>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 # --------------------------
 # Helpers
