@@ -238,7 +238,7 @@ def summarize_benchmark(df: pd.DataFrame) -> str:
 # PAGE: TPD Draft (full)
 # --------------------------
 if page == "TPD Draft":
-    st.title("TPD Draft Generator — Preserve Formatting (Word) + Industry Sources")
+    st.title("TPD Draft Generator")
     st.write("Upload prior-year TPD as **Microsoft Word (.docx or .doc)** to preserve fonts/colours/sizes. PDFs are supported but styles cannot be preserved.")
 
     prior = st.file_uploader(
