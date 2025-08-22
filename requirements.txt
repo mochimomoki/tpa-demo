@@ -1,0 +1,7 @@
+streamlit
+pandas
+pdfplumber
+python-docx
+jinja2
+beautifulsoup4
+requests
