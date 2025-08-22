@@ -40,7 +40,6 @@ page = st.sidebar.radio(
     "Choose function",
     ["TPD Draft", "TNMM Review", "CUT/CUP Review", "Information Request List", "Advisory / Opportunity Spotting"],
 )
-# ---- PwC theming (drop this right after st.set_page_config) ----
 
 # --------------------------
 # Helpers
