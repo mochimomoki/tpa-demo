@@ -1,14 +1,3 @@
-Got it! Here’s a drop-in replacement for the **“TPD Draft” page block only**, with the inputs reordered exactly as you asked:
-
-1. **Upload prior TPD**
-2. **New FY** (with Report Date alongside)
-3. **Type of information available**
-4. **Industry analysis mode**
-5. **Industry sources** (country + URLs + uploads)
-
-> Replace everything from `if page == "TPD Draft":` down to the next `elif page == "TNMM Review":` with the code below.
-
-```python
 # ==========================
 # PAGE: TPD Draft (reordered UI)
 # ==========================
@@ -245,7 +234,7 @@ if page == "TPD Draft":
 
             else:
                 st.error("Unsupported file type. Please upload .docx, .doc, or .pdf.")
-```
+
 
 
 
