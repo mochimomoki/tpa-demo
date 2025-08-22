@@ -163,6 +163,12 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+# --- Fix white-on-white text (force readable defaults) ---
+st.markdown("""
+<style>
+/* … all the fixes I gave you … */
+</style>
+""", unsafe_allow_html=True)
 
 
 # --------------------------
