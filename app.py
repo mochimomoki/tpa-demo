@@ -149,6 +149,12 @@ h3 {{ color: var(--pwc-orange2); }}
 }}
 </style>
 """, unsafe_allow_html=True)
+# --- Fix white-on-white text (force readable defaults) ---
+st.markdown("""
+<style>
+/* … all the fixes I gave you … */
+</style>
+""", unsafe_allow_html=True)
 
 # Optional: branded header on every page
 st.markdown(
