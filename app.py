@@ -1,6 +1,3 @@
-# ==========================
-# PAGE: TPD Draft (reordered UI)
-# ==========================
 if page == "TPD Draft":
     st.title("TPD Draft Generator")
     st.write("Upload prior-year TPD as **Microsoft Word (.docx or .doc)** to preserve fonts/colours/sizes. PDFs are supported but styles cannot be preserved.")
