@@ -1,4 +1,4 @@
-# app.py — TPD Draft Generator (industry-aware + auto research + DOCX formatting + .DOC conversion)
+# app.py — TPD Draft Generator (industry-aware + roll-forward vs rewrite + DOCX formatting + .DOC conversion)
 from __future__ import annotations
 import io, re, json, os, subprocess, tempfile
 from typing import Dict, Any, List, Optional, Tuple
@@ -22,7 +22,7 @@ except Exception:
 
 st.set_page_config(page_title="TPD Draft Generator", layout="wide")
 st.sidebar.title("TPA (Transfer Pricing Associate)")
-st.sidebar.caption("TPD roll-forward • industry-aware • formatting preserved")
+st.sidebar.caption("Roll-forward TPD • Industry-aware • Formatting preserved")
 
 page = st.sidebar.radio(
     "Choose function",
@@ -53,7 +53,7 @@ def read_docx_text_bytes(docx_bytes: bytes) -> str:
         return ""
 
 # ==========================
-# Helpers: .DOC → .DOCX conversion
+# Helpers: .DOC → .DOCX conversion (best-effort)
 # ==========================
 def _try_libreoffice_convert(doc_bytes: bytes) -> Optional[bytes]:
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -224,7 +224,6 @@ INDUSTRY_KEYWORDS = {
         "consulting", "legal services", "accounting", "advisory", "engineering services", "staff augmentation"
     ],
 }
-
 def detect_industry_label(text: str) -> str:
     low = (text or "").lower()
     scores = {label: 0 for label in INDUSTRY_KEYWORDS}
@@ -232,14 +231,14 @@ def detect_industry_label(text: str) -> str:
         for k in kws:
             if k in low:
                 scores[label] += 1
-    # pick best non-zero; else default macro
     best = max(scores.items(), key=lambda x: x[1])
     return best[0] if best[1] > 0 else "General / Macro"
 
 # ==========================
-# Auto Industry Research (World Bank) — sector packs
+# Auto Industry Research (World Bank) — sector packs (open-ended default)
 # ==========================
 WB_BASE = "https://api.worldbank.org/v2"
+
 def wb_get_countries() -> List[Dict[str, Any]]:
     try:
         r = requests.get(f"{WB_BASE}/country?format=json&per_page=400", timeout=15)
@@ -258,9 +257,8 @@ def wb_resolve_country(user_input: str) -> Optional[Tuple[str, str]]:
             return (c.get("id"), c.get("name"))
     return None
 
-# Indicator catalog (by pack)
+# Indicator catalog (default pack + sector add-ons)
 WB_INDICATORS_PACKS: Dict[str, Dict[str, Tuple[str, str]]] = {
-    # label: {key: (indicator_code, human_label)}
     "General / Macro": {
         "gdp_growth": ("NY.GDP.MKTP.KD.ZG", "GDP growth (annual %)"),
         "inflation": ("FP.CPI.TOTL.ZG", "Inflation, consumer prices (annual %)"),
@@ -289,15 +287,11 @@ WB_INDICATORS_PACKS: Dict[str, Dict[str, Tuple[str, str]]] = {
     },
     "Retail / Wholesale": {
         "internet_users": ("IT.NET.USER.ZS", "Individuals using the Internet (% of population)"),
-        # retail/e-comm-specific official series are limited; keep macro-enablers
     },
     "Healthcare / Pharma": {
-        # World Bank health spend % of GDP (public + private) exists but split;
-        # keep macro-enablers and let user URLs add sector specifics.
         "internet_users": ("IT.NET.USER.ZS", "Individuals using the Internet (% of population)"),
     },
     "Transport / Logistics": {
-        # WB has air transport passengers etc. but coverage varies; using a stable enabler:
         "internet_users": ("IT.NET.USER.ZS", "Individuals using the Internet (% of population)"),
     },
     "Professional Services": {
@@ -333,9 +327,8 @@ def wb_fetch_indicator_series(iso2: str, indicator: str) -> Dict[str, Any]:
 def auto_sector_research(country_input: str, industry_label: str) -> Dict[str, Any]:
     resolved = wb_resolve_country(country_input)
     if not resolved:
-        return {"note": "Could not resolve country; please use a standard name (e.g., Singapore).", "items": []}
+        return {"note": "Could not resolve country; please use a standard name (e.g., Singapore).", "items": {}}
     iso2, country_name = resolved
-    # merge General + specific pack for richer context
     pack = {**WB_INDICATORS_PACKS["General / Macro"], **WB_INDICATORS_PACKS.get(industry_label, {})}
     out = {"country": country_name, "iso2": iso2, "industry": industry_label, "items": {}, "notes": []}
     for key, (code, label) in pack.items():
@@ -394,7 +387,7 @@ def fetch_title(url: str) -> str:
         return url
 
 # ==========================
-# PAGE: TPD Draft (industry-aware)
+# PAGE: TPD Draft (industry-aware + roll-forward vs rewrite)
 # ==========================
 if page == "TPD Draft":
     st.title("TPD Draft Generator")
@@ -414,7 +407,15 @@ if page == "TPD Draft":
     with colC:
         override_country = st.text_input("Country for auto research", value="Singapore")
 
-    # Step 1: detect industry from prior TPD
+    # Industry analysis mode
+    st.subheader("Industry Analysis Mode")
+    industry_mode = st.radio(
+        "How should we handle Industry Analysis?",
+        ["Roll-forward (update facts & stats)", "Full Rewrite"],
+        help="Roll-forward: update outdated numbers and citations only, keeping prior narrative. Full Rewrite: rebuild the section from scratch."
+    )
+
+    # Detect industry from prior TPD text
     detected_industry = "General / Macro"
     prior_text_for_detection = ""
     if prior is not None:
@@ -439,6 +440,7 @@ if page == "TPD Draft":
         help="Auto-detected from prior TPD text. You can override."
     )
 
+    # Additional information options
     mode = st.radio("Additional information available?", [
         "No information",
         "Client information request",
@@ -471,11 +473,14 @@ if page == "TPD Draft":
             except Exception as e:
                 st.error(f"Could not read client info: {e}")
 
+    # Open-ended sources: user URLs + uploaded reports (we will cite titles/URLs)
     st.subheader("Industry sources (optional)")
-    st.write("We will auto-research official World Bank stats for the detected/selected industry. You can also add specific URLs.")
+    st.write("We will auto-research official stats by default (World Bank). You can also add specific URLs and upload reports.")
     urls = st.text_area("Extra source URLs (one per line, optional)", value="")
     user_url_list = [u.strip() for u in urls.splitlines() if u.strip()]
+    user_reports = st.file_uploader("Upload market/industry reports (PDF/DOCX/TXT — optional)", type=["pdf","docx","txt"], accept_multiple_files=True)
 
+    # Advanced text replacements
     adv = st.expander("Advanced: custom replacements (JSON)", expanded=False)
     with adv:
         st.write('Example: {"{{ENTITY}}": "ABC Pte Ltd", "{{COUNTRY}}": "Singapore"}')
@@ -485,7 +490,7 @@ if page == "TPD Draft":
         if prior is None:
             st.error("Please upload a prior TPD (Word .docx/.doc preferred).")
         else:
-            # 1) Auto industry research tailored to chosen industry
+            # 1) Auto sector research tailored to chosen industry (default credible source)
             sector_pack = auto_sector_research(override_country, industry_choice)
             auto_lines, auto_foots = format_sector_update_text(sector_pack)
 
@@ -518,7 +523,7 @@ if page == "TPD Draft":
                     st.error(str(e))
                     is_docx = False
 
-            # 4) DOCX: formatting-preserved replacements + inserts
+            # 4) DOCX path (formatting preserved)
             if is_docx:
                 if DocxDocument is None:
                     st.error("python-docx is not available in this environment.")
@@ -528,6 +533,7 @@ if page == "TPD Draft":
                     auto_repl.update(user_repl)
                     hits = docx_replace_text_everywhere(doc, auto_repl)
 
+                    # Conditional inserts
                     if bench_df is not None and not bench_df.empty:
                         acc = (bench_df.get("Decision", "").astype(str).str.lower() == "accept").sum()
                         rej = (bench_df.get("Decision", "").astype(str).str.lower() == "reject").sum()
@@ -543,20 +549,37 @@ if page == "TPD Draft":
                             if line.strip():
                                 doc.add_paragraph("• " + line.strip())
 
-                    # --- Industry Update (auto + user URLs) ---
+                    # --- Industry Update (mode-aware) ---
                     doc.add_paragraph()
                     doc.add_paragraph(f"Industry Update — {industry_choice}")
+
+                    # In Roll-forward mode: add concise “updates only” preface
+                    if industry_mode.startswith("Roll-forward"):
+                        doc.add_paragraph("The prior-year narrative is retained. The facts and figures below are refreshed for the current period:")
+
+                    # Auto lines from credible defaults (World Bank)
                     if auto_lines:
                         for ln in auto_lines:
                             doc.add_paragraph(f"- {ln}")
+
+                    # User URLs appended (titles + footnotes)
                     foots: List[Tuple[int, str]] = []
                     if auto_foots:
                         foots.extend(auto_foots)
+
                     if user_url_list:
                         for u in user_url_list:
                             title = fetch_title(u)
                             doc.add_paragraph(f"- See: {title}")
                             foots.append((len(foots) + 1, u))
+
+                    # Uploaded reports: list them as sources (we’re not parsing content in this open-ended version)
+                    if user_reports:
+                        for f in user_reports:
+                            label = getattr(f, "name", "uploaded report")
+                            doc.add_paragraph(f"- See: {label}")
+                            foots.append((len(foots) + 1, f"uploaded://{label}"))
+
                     if foots:
                         doc.add_paragraph("Sources:")
                         for i, url in foots:
@@ -571,8 +594,8 @@ if page == "TPD Draft":
                     )
                     st.success(f"Draft generated. Replacements applied: {hits}")
 
+            # 5) PDF path (JSON fallback)
             elif is_pdf:
-                # PDF fallback (no styles)
                 text = read_pdf(prior_buffer)
                 payload = {
                     "note": "PDF input: style not preserved. Upload .docx to keep formatting.",
@@ -580,6 +603,7 @@ if page == "TPD Draft":
                     "report_date": report_date.strip(),
                     "industry": industry_choice,
                     "country": override_country,
+                    "analysis_mode": industry_mode,
                     "auto_research": {"lines": auto_lines, "sources": [u for _, u in auto_foots]},
                     "irl": irl_text,
                 }
@@ -589,6 +613,9 @@ if page == "TPD Draft":
                     payload["benchmark_summary"] = f"{acc} accepted, {rej} rejected, {len(bench_df)} total"
                 if user_url_list:
                     payload["user_sources"] = user_url_list
+                if user_reports:
+                    payload["uploaded_reports"] = [getattr(f, "name", "report") for f in user_reports]
+
                 st.download_button(
                     "Download Draft (JSON)",
                     data=json.dumps(payload, indent=2).encode("utf-8"),
@@ -596,6 +623,7 @@ if page == "TPD Draft":
                     mime="application/json",
                 )
                 st.info("To preserve fonts/colours, please upload a Word .docx file.")
+
             else:
                 st.error("Unsupported file type. Please upload .docx, .doc, or .pdf.")
 
@@ -656,4 +684,5 @@ elif page == "Information Request List":
 else:
     st.title("Advisory / Opportunity Spotting (demo)")
     st.info("Upload a benchmark on the TNMM page to explore opportunities; simplified here.")
+
 
