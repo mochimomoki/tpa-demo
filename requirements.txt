@@ -6,4 +6,4 @@ openpyxl
 requests
 jinja2
 beautifulsoup4
-requests
+pypandoc 
