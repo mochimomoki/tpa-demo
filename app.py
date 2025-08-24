@@ -390,107 +390,16 @@ def fetch_title(url: str) -> str:
 # PAGE: TPD Draft (industry-aware + roll-forward vs rewrite)
 # ==========================
 if page == "TPD Draft":
+page = st.sidebar.radio(
+    "Choose function",
+    ["TPD Draft", "TNMM Review", "CUT/CUP Review", "Information Request List", "Advisory / Opportunity Spotting"],
+)
+
+# ==========================
+# PAGE: TPD Draft (industry-aware + roll-forward vs rewrite)
+# ==========================
+if page == "TPD Draft":
     st.title("TPD Draft Generator")
-    st.write("Upload prior-year TPD as **Microsoft Word (.docx or .doc)** to preserve fonts/colours/sizes. PDFs are supported but styles cannot be preserved.")
-
-    # 1) Upload prior TPD
-    prior = st.file_uploader(
-        "Upload Prior TPD (DOCX/DOC preferred; PDF supported as JSON fallback)",
-        type=["docx", "doc", "pdf"],
-        accept_multiple_files=False
-    )
-
-    # 2) New FY
-    new_fy = st.number_input("New FY (e.g., 2024)", min_value=1990, max_value=2100, value=2024)
-
-    # 3) Financial year end (new field)
-    fye_date = st.text_input("Financial Year End (e.g., 31 December 2024)", value="")
-
-    # 4) Country of report
-    override_country = st.text_input("Country of report (for auto research)", value="Singapore")
-
-    # 5) Information available
-    mode = st.radio("Additional information available?", [
-        "No information",
-        "Client information request",
-        "Benchmark study",
-        "Both (IRL + Benchmark)",
-    ])
-
-    bench_df: Optional[pd.DataFrame] = None
-    irl_text: Optional[str] = None
-
-    if mode in ("Benchmark study", "Both (IRL + Benchmark)"):
-        bench_file = st.file_uploader("Attach benchmark export (CSV/XLSX)", type=["csv", "xlsx"], key="bench")
-        if bench_file is not None:
-            try:
-                bench_df = pd.read_csv(bench_file) if bench_file.name.endswith(".csv") else pd.read_excel(bench_file)
-                st.caption("Loaded benchmark for inclusion in draft.")
-            except Exception as e:
-                st.error(f"Could not read benchmark: {e}")
-
-    if mode in ("Client information request", "Both (IRL + Benchmark)"):
-        irl_up = st.file_uploader("Attach client info (TXT/CSV) to insert", type=["txt", "csv"], key="irl")
-        if irl_up is not None:
-            try:
-                if irl_up.name.endswith(".csv"):
-                    _df = pd.read_csv(irl_up)
-                    irl_text = "\n".join("- " + " | ".join(map(str, row)) for _, row in _df.iterrows())
-                else:
-                    irl_text = irl_up.read().decode("utf-8", errors="ignore")
-                st.caption("Loaded client information for inclusion.")
-            except Exception as e:
-                st.error(f"Could not read client info: {e}")
-
-    # 6) Industry analysis mode
-    st.subheader("Industry Analysis Mode")
-    industry_mode = st.radio(
-        "How should we handle Industry Analysis?",
-        ["Roll-forward (update facts & stats)", "Full Rewrite"],
-        help="Roll-forward: update outdated numbers and citations only, keeping prior narrative. Full Rewrite: rebuild the section from scratch."
-    )
-
-    # Detect industry from prior TPD text
-    detected_industry = "General / Macro"
-    prior_text_for_detection = ""
-    if prior is not None:
-        name = prior.name.lower()
-        if name.endswith(".docx"):
-            prior_text_for_detection = read_docx_text_bytes(prior.getvalue())
-        elif name.endswith(".doc"):
-            try:
-                converted = convert_doc_to_docx_bytes(prior.getvalue())
-                prior_text_for_detection = read_docx_text_bytes(converted)
-            except Exception:
-                prior_text_for_detection = ""
-        elif name.endswith(".pdf"):
-            prior_text_for_detection = read_pdf(io.BytesIO(prior.getvalue()))
-        detected_industry = detect_industry_label(prior_text_for_detection)
-
-    st.write("**Detected industry (from prior TPD, editable):**")
-    industry_choice = st.selectbox(
-        "Industry",
-        options=list(WB_INDICATORS_PACKS.keys()),
-        index=list(WB_INDICATORS_PACKS.keys()).index(detected_industry) if detected_industry in WB_INDICATORS_PACKS else 0,
-        help="Auto-detected from prior TPD text. You can override."
-    )
-
-    # 7) Industry sources
-    st.subheader("Industry sources (optional)")
-    urls = st.text_area("Extra source URLs (one per line, optional)", value="")
-    user_url_list = [u.strip() for u in urls.splitlines() if u.strip()]
-    user_reports = st.file_uploader("Upload market/industry reports (PDF/DOCX/TXT — optional)", type=["pdf","docx","txt"], accept_multiple_files=True)
-
-    # Advanced text replacements
-    adv = st.expander("Advanced: custom replacements (JSON)", expanded=False)
-    with adv:
-        st.write('Example: {"{{ENTITY}}": "ABC Pte Ltd", "{{COUNTRY}}": "Singapore"}')
-        repl_json = st.text_area("Key-value JSON (optional)", value="")
-
-    # --- Generate draft (same as before) ---
-    if st.button("Generate TPD draft now", type="primary"):
-        # [generation logic stays unchanged below...]
-        ...
 
 
 # ==========================
