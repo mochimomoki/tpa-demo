@@ -168,74 +168,15 @@ def format_sector_update_text(country:str)->List[str]:
 # PAGE: TPD Draft
 # ==========================
 if page=="TPD Draft":
-    st.title("TPD Draft Generator")
+    from docx import Document
 
-    # 1) Upload prior TPD
-    prior=st.file_uploader("Upload Prior TPD (.docx/.doc/.pdf)",type=["docx","doc","pdf"])
-
-    # 2) New FY
-    new_fy=st.number_input("New FY",1990,2100,2024)
-
-    # 3) Financial Year End
-    fye_date=st.text_input("Financial Year End",value="31 Dec 2024")
-
-    # 4) Country of report
-    all_countries=[c.get("name") for c in wb_get_countries()]
-    country_choice=st.selectbox("Select jurisdiction",["OECD"]+list(JURISDICTION_RULES.keys())+all_countries,index=1)
-
-    # 5) Information available
-    mode=st.radio("Additional information available?",["No information","Client information request","Benchmark study","Both"])
-    bench_df=None; irl_text=None
-    if mode in("Benchmark study","Both"):
-        bench_file=st.file_uploader("Upload benchmark (CSV/XLSX)",type=["csv","xlsx"])
-        if bench_file is not None: bench_df=pd.read_csv(bench_file) if bench_file.name.endswith(".csv") else pd.read_excel(bench_file)
-    if mode in("Client information request","Both"):
-        irl_up=st.file_uploader("Upload client info (TXT/CSV)",type=["txt","csv"])
-        if irl_up is not None: irl_text=irl_up.read().decode("utf-8",errors="ignore")
-
-    # 6) Industry Analysis Mode
-    industry_mode=st.radio("Industry Analysis Mode",["Roll-forward","Full Rewrite"])
-
-    detected="General / Macro"
-    if prior is not None:
-        if prior.name.endswith(".docx"): text=read_docx_text_bytes(prior.getvalue())
-        elif prior.name.endswith(".pdf"): text=read_pdf(io.BytesIO(prior.getvalue()))
-        else: text=""
-        detected=detect_industry_label(text)
-    industry_choice=st.selectbox("Industry",list(INDUSTRY_KEYWORDS.keys()),index=list(INDUSTRY_KEYWORDS.keys()).index(detected))
-
-    # 7) Industry sources
-    urls=st.text_area("Extra source URLs")
-    user_url_list=[u.strip() for u in urls.splitlines() if u.strip()]
-
-    # Generate
-    if st.button("Generate TPD Draft",type="primary"):
-        if prior is None:
-            st.error("Upload a TPD first")
-        else:
-            detected_sections=["FAR","Economic Analysis","Related Party Transactions"]  # TODO: parse actual file
-            issues=check_jurisdiction_compliance(country_choice,detected_sections,revenue=20000000)
-            if issues:
-                st.warning("⚠️ Compliance Gaps Found:")
-                for i in issues: st.write(f"- {i}")
-            else:
-                st.success(f"Draft complies with {country_choice} guidelines.")
-
-            # Industry lines
-            resolved=wb_resolve_country(country_choice)
-            lines=format_sector_update_text(resolved[0]) if resolved else []
-            draft=f"--- Draft TPD ---\nJurisdiction: {country_choice}\nNew FY: {new_fy}\nFYE: {fye_date}\n\nIndustry Analysis ({industry_mode}): {industry_choice}\n"
-            for ln in lines: draft+=f"\n- {ln}"
-            if user_url_list: draft+="\nExtra sources:\n"+"\n".join(user_url_list)
-            st.text_area("Preview Draft",draft,height=300)
-            from docx import Document
-
-if st.button("Generate TPD Draft", type="primary"):
+if st.button("Generate TPD Draft", type="primary", key="tpd_generate"):
     if prior is None:
-        st.error("Upload a TPD first")
+        st.error("Please upload a prior TPD (.docx/.doc/.pdf)")
     else:
-        detected_sections=["FAR","Economic Analysis","Related Party Transactions"]  
-        issues=check_jurisdiction_compliance(country_choice,detected_sections,revenue=20000000)
+        # Compliance check
+        detected_sections = ["FAR","Economic Analysis","Related Party Transactions"]  # TODO: parse actual doc headings
+        issues = check_jurisdiction_compliance(country_choice, detected_sections, revenue=20000000)
 
         if issues:
             st.warning("⚠️ Compliance Gaps Found:")
@@ -244,35 +185,45 @@ if st.button("Generate TPD Draft", type="primary"):
         else:
             st.success(f"Draft complies with {country_choice} guidelines.")
 
-        # Industry lines
-        resolved=wb_resolve_country(country_choice)
-        lines=format_sector_update_text(resolved[0]) if resolved else []
-
-        # --- Create Word document ---
-        doc=Document()
+        # --- Build the draft TPD ---
+        doc = Document()
         doc.add_heading("Transfer Pricing Documentation — Draft", level=1)
         doc.add_paragraph(f"Jurisdiction: {country_choice}")
         doc.add_paragraph(f"New FY: {new_fy}")
-        doc.add_paragraph(f"FYE: {fye_date}")
+        doc.add_paragraph(f"Financial Year End: {fye_date}")
         doc.add_paragraph(f"Industry: {industry_choice}")
         doc.add_paragraph(f"Industry Analysis Mode: {industry_mode}")
 
         doc.add_heading("Industry Update", level=2)
+        resolved = wb_resolve_country(country_choice)
+        lines = format_sector_update_text(resolved[0]) if resolved else []
         for ln in lines:
-            doc.add_paragraph(ln)
+            doc.add_paragraph(f"- {ln}")
 
         if user_url_list:
             doc.add_heading("Additional Sources", level=2)
             for u in user_url_list:
                 doc.add_paragraph(u)
 
+        if bench_df is not None:
+            doc.add_heading("Benchmark Study", level=2)
+            acc = (bench_df.get("Decision", "").astype(str).str.lower() == "accept").sum()
+            rej = (bench_df.get("Decision", "").astype(str).str.lower() == "reject").sum()
+            doc.add_paragraph(f"Vendor study: {acc} accepted, {rej} rejected, {len(bench_df)} total.")
+
+        if irl_text:
+            doc.add_heading("Client Information", level=2)
+            for line in irl_text.splitlines():
+                if line.strip():
+                    doc.add_paragraph(f"• {line.strip()}")
+
         # Save to buffer
-        out=io.BytesIO()
+        out = io.BytesIO()
         doc.save(out)
         out.seek(0)
 
         st.download_button(
-            "Download Draft TPD (DOCX)",
+            "⬇️ Download Draft TPD (DOCX)",
             data=out,
             file_name="TPD_Draft.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
