@@ -1,5 +1,3 @@
-23/08/25 - 2:09am (perf but need to change structure)
-
 # app.py — TPD Draft Generator (industry-aware + roll-forward vs rewrite + DOCX formatting + .DOC conversion)
 from __future__ import annotations
 import io, re, json, os, subprocess, tempfile
@@ -686,6 +684,7 @@ elif page == "Information Request List":
 else:
     st.title("Advisory / Opportunity Spotting (demo)")
     st.info("Upload a benchmark on the TNMM page to explore opportunities; simplified here.")
+
 
 
 
