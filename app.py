@@ -1,14 +1,33 @@
-# app.py — TPD Draft Generator (industry-aware + roll-forward vs rewrite + DOCX formatting + .DOC conversion)
+# app.py — Intelligent Transfer Pricing Platform (Functions 1–6)
+# Streamlit single-file app scaffolding the core workflow for:
+# 1) RPT Analyser  2) Compliance Checker  3) Information Request Generator
+# 4) TPD Generator  5) Master File Generator  6) Industry Analysis Generator
+#
+# ✅ Design goals
+# - Pluggable "Guideline Packs" per jurisdiction (thresholds, required sections, example questions)
+# - Robust ingestion of PDFs/DOCX for financials & TPDs (section-name synonyms + regex heuristics)
+# - Checklist-style compliance outputs with explanations
+# - Roll-forward + fresh build pipelines for TPD/Master File using a DOCX template (format preserved)
+# - Industry analysis writer with charts, citations/footnotes, and DOCX/XLSX exports
+# - Optional live research (user-supplied URLs). Wikipedia/blogs auto-excluded.
+# - Downloadable results
+#
+# 🔧 Recommended environment
+#   pip install streamlit pandas numpy pdfplumber python-docx openpyxl matplotlib beautifulsoup4 lxml rapidfuzz pyyaml
+#
+# ▶️ Run:
+#   streamlit run app.py
+
 from __future__ import annotations
-import io, re, json, os, subprocess, tempfile
-from typing import Dict, Any, List, Optional, Tuple
+import os, io, re, json, uuid, tempfile, textwrap, datetime, itertools
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 import pandas as pd
-import requests
-from bs4 import BeautifulSoup
+import numpy as np
 
-# Optional deps
+# Optional deps — app will degrade gracefully if unavailable
 try:
     import pdfplumber
 except Exception:
@@ -16,678 +35,789 @@ except Exception:
 
 try:
     from docx import Document as DocxDocument
-    from docx.text.paragraph import Paragraph
+    from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+    from docx.shared import Inches, Pt
 except Exception:
-    DocxDocument = None  # guarded below
+    DocxDocument = None
 
-st.set_page_config(page_title="TPD Draft Generator", layout="wide")
-st.sidebar.title("TPA (Transfer Pricing Associate)")
-st.sidebar.caption("Roll-forward TPD • Industry-aware • Formatting preserved")
+try:
+    import openpyxl
+    from openpyxl import Workbook
+except Exception:
+    openpyxl = None
 
-page = st.sidebar.radio(
-    "Choose function",
-    ["TPD Draft", "TNMM Review", "CUT/CUP Review", "Information Request List", "Advisory / Opportunity Spotting"],
-)
+try:
+    import matplotlib.pyplot as plt
+except Exception:
+    plt = None
 
-# ==========================
-# Helpers: PDF / DOCX text
-# ==========================
-def read_pdf(file_like) -> str:
-    if pdfplumber is None:
-        return ""
+try:
+    from bs4 import BeautifulSoup
+    import lxml  # noqa: F401
+    import requests
+except Exception:
+    BeautifulSoup = None
+    requests = None
+
+try:
+    import yaml
+except Exception:
+    yaml = None
+
+try:
+    from rapidfuzz import fuzz, process as rf_process
+except Exception:
+    fuzz = None
+    rf_process = None
+
+st.set_page_config(page_title="Transfer Pricing Assistant — v1 (Functions 1–6)", layout="wide")
+st.title("🧠 Transfer Pricing Assistant — Functions 1–6")
+st.caption("RPT analyser • Compliance checker • Info request • TPD/Master file generator • Industry analysis")
+
+# ------------------------------------------------------------
+# Helpers & Utilities
+# ------------------------------------------------------------
+
+@st.cache_data(show_spinner=False)
+def _read_file_bytes(uploaded) -> bytes:
+    if uploaded is None:
+        return b""
+    return uploaded.getvalue()
+
+
+def _ensure_pkg(name: str, module_obj: Any, hint: str) -> bool:
+    if module_obj is None:
+        st.error(f"Missing optional dependency **{name}** — {hint}")
+        return False
+    return True
+
+
+# ----------------- Jurisdiction Guideline Packs -----------------
+# You can load a full pack via YAML/JSON upload. A small starter pack is embedded for demo purposes only.
+# Structure reference:
+# {
+#   "jurisdictions": {
+#       "Singapore": {
+#           "tax_authority": "IRAS",
+#           "tpd_thresholds": [
+#               {"label": "Sale or purchase of goods with related parties", "currency": "SGD", "threshold": 15000000, "guidance_ref": "IRAS TP Guidelines (indicative transaction threshold)", "citation_url": "https://www.iras.gov.sg/"}
+#           ],
+#           "local_file_requirements": ["Organisational structure", "Business overview", ...],
+#           "master_file_requirements": [ ... ],
+#           "compliance_explanations": {"Organisational structure": "Org chart...", ...},
+#           "info_request_questions": ["Were there any business restructurings in FY {YEAR}?", ...],
+#           "industry_preferred_sources": ["https://www.mas.gov.sg/", "https://www.tablebuilder.singstat.gov.sg/"],
+#       },
+#       ...
+#   },
+#   "oecd": {"local_file_requirements": [...], "master_file_requirements": [...]} 
+# }
+
+STARTER_PACK = {
+    "jurisdictions": {
+        "Singapore": {
+            "tax_authority": "IRAS",
+            # ⚠️ Demo values — please validate/update against the latest IRAS guidance in production.
+            "tpd_thresholds": [
+                {"label": "Sale or purchase of goods with related parties", "currency": "SGD", "threshold": 15000000, "guidance_ref": "IRAS TP Guidelines — indicative threshold for goods (demo)", "citation_url": "https://www.iras.gov.sg/"},
+                {"label": "Provision or receipt of services with related parties", "currency": "SGD", "threshold": 1000000, "guidance_ref": "IRAS TP Guidelines — indicative threshold for services (demo)", "citation_url": "https://www.iras.gov.sg/"},
+            ],
+            "local_file_requirements": [
+                "Organisational structure",
+                "Description of business and industry",
+                "Covered related party transactions",
+                "Functional analysis (functions, assets, risks)",
+                "Selection and application of transfer pricing method",
+                "Benchmarking/economic analysis",
+                "Financial information (tested party results)",
+                "Conclusion"
+            ],
+            "master_file_requirements": [
+                "Organisational structure (group)",
+                "Description of MNE business including important drivers of business profit",
+                "Description of MNE's intangibles and strategy",
+                "Intercompany financial activities",
+                "MNE's consolidated financial and tax positions",
+            ],
+            "compliance_explanations": {
+                "Organisational structure": "Include org chart and ownership structure with percentages.",
+                "Description of business and industry": "Describe key activities, supply chain, and economic environment.",
+                "Functional analysis (functions, assets, risks)": "Analyse who does what, who uses/owns what, and who bears which risks.",
+            },
+            "info_request_questions": [
+                "Were there any business restructurings in FY {YEAR}? If yes, provide details and impact on P&L.",
+                "Provide detailed related party transaction listings by counterparty for FY {YEAR}.",
+                "Provide segmented P&L by transaction category for FY {YEAR}.",
+                "Provide intercompany agreements (new/updated) executed in FY {YEAR}.",
+                "Provide description of key value drivers and supply chain for FY {YEAR}.",
+            ],
+            "industry_preferred_sources": [
+                "https://www.mas.gov.sg/",
+                "https://www.tablebuilder.singstat.gov.sg/",
+                "https://data.worldbank.org/",
+                "https://www.imf.org/",
+            ],
+        },
+        # Add more jurisdictions here or upload a full pack via sidebar.
+        "OECD": {
+            "local_file_requirements": [
+                "Local entity overview",
+                "Controlled transactions and context",
+                "Comparable analysis and method selection",
+                "Financial information of the local entity",
+            ],
+            "master_file_requirements": [
+                "Organisational structure",
+                "Description of MNE business",
+                "Intangibles",
+                "Intercompany financial activities",
+                "Financial and tax positions",
+            ],
+        },
+    }
+}
+
+
+def load_guideline_pack(uploaded_file: Optional[io.BytesIO]) -> Dict[str, Any]:
+    if uploaded_file is None:
+        return STARTER_PACK
     try:
-        with pdfplumber.open(file_like) as pdf:
-            return "\n".join(p.extract_text() or "" for p in pdf.pages)
-    except Exception:
-        return ""
+        raw = uploaded_file.getvalue().decode("utf-8", errors="ignore")
+        if uploaded_file.name.lower().endswith((".yaml", ".yml")) and yaml is not None:
+            return yaml.safe_load(raw)
+        else:
+            return json.loads(raw)
+    except Exception as e:
+        st.warning(f"Failed to parse uploaded pack: {e}. Falling back to starter pack.")
+        return STARTER_PACK
 
-def read_docx_text_bytes(docx_bytes: bytes) -> str:
-    """Lightweight text extraction from DOCX for industry detection (doesn't alter formatting)."""
-    if DocxDocument is None:
+
+# ----------------- Text Extraction -----------------
+
+SECTION_SYNONYMS = {
+    "income_statement": [
+        "income statement",
+        "statement of profit or loss",
+        "profit or loss",
+        "statement of profit and loss",
+        "statement of comprehensive income",
+        "comprehensive income",
+        "profit and loss",
+    ],
+    "related_party": [
+        "related party",
+        "related parties",
+        "transactions with related",
+        "balances with related",
+        "due from related",
+        "due to related",
+        "significant related",
+        "intercompany",
+    ],
+}
+
+CURRENCY_SIGNS = ["USD", "SGD", "S$", "$", "EUR", "IDR", "MYR", "RM", "AUD", "CNY", "JPY", "£", "HKD"]
+NUMBER_RE = re.compile(r"(?<![\w/])-?\(?\d{1,3}(?:,\d{3})*(?:\.\d+)?\)?")
+YEAR_RE = re.compile(r"(?<!\d)(20\d{2}|19\d{2})(?!\d)")
+
+
+def extract_text_from_pdf(pdf_bytes: bytes) -> str:
+    if not _ensure_pkg("pdfplumber", pdfplumber, "pip install pdfplumber"):
         return ""
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        pages = [p.extract_text() or "" for p in pdf.pages]
+    return "\n\n".join(pages)
+
+
+def extract_text_from_docx(docx_bytes: bytes) -> str:
+    if not _ensure_pkg("python-docx", DocxDocument, "pip install python-docx"):
+        return ""
+    bio = io.BytesIO(docx_bytes)
+    doc = DocxDocument(bio)
+    parts = []
+    for p in doc.paragraphs:
+        parts.append(p.text)
+    # tables
+    for tbl in doc.tables:
+        for row in tbl.rows:
+            parts.append("\t".join(cell.text for cell in row.cells))
+    return "\n".join(parts)
+
+
+def extract_text(uploaded) -> str:
+    if uploaded is None:
+        return ""
+    data = _read_file_bytes(uploaded)
+    name = uploaded.name.lower()
+    if name.endswith(".pdf"):
+        return extract_text_from_pdf(data)
+    elif name.endswith(".docx"):
+        return extract_text_from_docx(data)
+    else:
+        return data.decode("utf-8", errors="ignore")
+
+
+# ----------------- Fuzzy helpers -----------------
+
+def fuzzy_contains(hay: str, needles: List[str], ratio: int = 80) -> bool:
+    if rf_process is None:
+        # Fallback: simple substring match
+        h = hay.lower()
+        return any(n.lower() in h for n in needles)
+    choices = [hay]
+    for n in needles:
+        match, score, _ = rf_process.extractOne(n, choices, scorer=fuzz.partial_ratio)
+        if score >= ratio:
+            return True
+    return False
+
+
+# ----------------- Amount parsing -----------------
+
+def _to_number(token: str) -> Optional[float]:
+    if not token:
+        return None
+    t = token.strip().replace(",", "")
+    neg = False
+    if t.startswith("(") and t.endswith(")"):
+        neg = True
+        t = t[1:-1]
     try:
-        bio = io.BytesIO(docx_bytes)
-        doc = DocxDocument(bio)
-        return "\n".join(p.text for p in doc.paragraphs)
-    except Exception:
-        return ""
-
-# ==========================
-# Helpers: .DOC → .DOCX conversion (best-effort)
-# ==========================
-def _try_libreoffice_convert(doc_bytes: bytes) -> Optional[bytes]:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        in_path = os.path.join(tmpdir, "in.doc")
-        out_path = os.path.join(tmpdir, "in.docx")
-        with open(in_path, "wb") as f:
-            f.write(doc_bytes)
-        try:
-            subprocess.run(
-                ["soffice", "--headless", "--convert-to", "docx", "--outdir", tmpdir, in_path],
-                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            if os.path.exists(out_path):
-                with open(out_path, "rb") as f:
-                    return f.read()
-        except Exception:
-            return None
-    return None
-
-def _try_pandoc_convert(doc_bytes: bytes) -> Optional[bytes]:
-    try:
-        import pypandoc  # type: ignore
+        val = float(t)
+        return -val if neg else val
     except Exception:
         return None
-    with tempfile.TemporaryDirectory() as tmpdir:
-        in_path = os.path.join(tmpdir, "in.doc")
-        out_path = os.path.join(tmpdir, "out.docx")
-        with open(in_path, "wb") as f:
-            f.write(doc_bytes)
-        try:
-            pypandoc.convert_file(in_path, "docx", outputfile=out_path)
-            if os.path.exists(out_path):
-                with open(out_path, "rb") as f:
-                    return f.read()
-        except Exception:
-            return None
-    return None
 
-def convert_doc_to_docx_bytes(doc_bytes: bytes) -> bytes:
-    converted = _try_libreoffice_convert(doc_bytes)
-    if converted:
-        return converted
-    converted = _try_pandoc_convert(doc_bytes)
-    if converted:
-        return converted
-    raise RuntimeError(
-        "Could not convert .doc to .docx automatically. "
-        "Please save the file as .docx in Microsoft Word and re-upload."
-    )
 
-# ==========================
-# Helpers: DOCX formatting-preserving replacements
-# ==========================
-def _iter_all_paragraphs(doc):
+def find_amounts_near_keywords(text: str, keywords: List[str], window: int = 120) -> List[Tuple[str, float, str]]:
+    results = []
+    lower = text.lower()
+    for m in NUMBER_RE.finditer(text):
+        start = m.start()
+        snippet_start = max(0, start - window)
+        snippet_end = min(len(text), m.end() + window)
+        snippet = text[snippet_start:snippet_end]
+        snip_lower = lower[snippet_start:snippet_end]
+        if any(kw in snip_lower for kw in [k.lower() for k in keywords]):
+            num = _to_number(m.group(0).replace("$", ""))
+            if num is None:
+                continue
+            # crude currency guess
+            cur = None
+            for c in CURRENCY_SIGNS:
+                if c.lower() in snip_lower:
+                    cur = c
+                    break
+            results.append((cur or "(unknown)", num, snippet.strip()))
+    return results
+
+
+# ----------------- DOCX editing helpers -----------------
+
+def replace_text_in_docx(doc: Any, mapping: Dict[str, str]) -> None:
+    """Naive run-wise replacement that preserves basic formatting.
+    Mapping keys should be simple tokens like {{CLIENT_NAME}}.
+    """
+    if DocxDocument is None:
+        return
+    # Paragraphs
     for p in doc.paragraphs:
-        yield p
+        for k, v in mapping.items():
+            if k in p.text:
+                # reconstruct runs
+                inline = p.runs
+                whole = "".join(run.text for run in inline)
+                new_text = whole.replace(k, v)
+                # Clear and reinsert into the first run; preserve style of first run
+                for idx in range(len(inline)):
+                    inline[idx].text = "" if idx > 0 else new_text
+    # Tables
     for tbl in doc.tables:
         for row in tbl.rows:
             for cell in row.cells:
                 for p in cell.paragraphs:
-                    yield p
-    for section in doc.sections:
-        if section.header:
-            for p in section.header.paragraphs:
-                yield p
-            for tbl in section.header.tables:
-                for row in tbl.rows:
-                    for cell in row.cells:
-                        for p in cell.paragraphs:
-                            yield p
-        if section.footer:
-            for p in section.footer.paragraphs:
-                yield p
-            for tbl in section.footer.tables:
-                for row in tbl.rows:
-                    for cell in row.cells:
-                        for p in cell.paragraphs:
-                            yield p
+                    for k, v in mapping.items():
+                        if k in p.text:
+                            inline = p.runs
+                            whole = "".join(run.text for run in inline)
+                            new_text = whole.replace(k, v)
+                            for idx in range(len(inline)):
+                                inline[idx].text = "" if idx > 0 else new_text
 
-def _replace_preserving_style(paragraph: "Paragraph", old: str, new: str) -> int:
-    if old not in paragraph.text:
-        return 0
-    runs = paragraph.runs
-    full = "".join(r.text for r in runs)
-    n = full.count(old)
-    full_new = full.replace(old, new)
-    if runs:
-        style = runs[0].style
-        for r in runs: r.text = ""
-        runs[0].text = full_new
-        runs[0].style = style
+
+def add_heading(doc: Any, text: str, level: int = 1):
+    if DocxDocument is None:
+        return
+    h = doc.add_paragraph()
+    run = h.add_run(text)
+    run.bold = True
+    if level == 1:
+        run.font.size = Pt(16)
+    elif level == 2:
+        run.font.size = Pt(14)
     else:
-        paragraph.add_run(full_new)
-    return n
+        run.font.size = Pt(12)
 
-def docx_replace_text_everywhere(doc: "DocxDocument", replacements: Dict[str, str]) -> int:
-    total = 0
-    for p in _iter_all_paragraphs(doc):
-        for old, new in replacements.items():
-            total += _replace_preserving_style(p, old, new)
-    return total
 
-def detect_years(text: str) -> set:
-    years = set(re.findall(r"(?:FY\s*-?_?\s*)?(20\d{2})", text, flags=re.I))
-    ranges = re.findall(r"(?:FY\s*)?(20\d{2})\s*/\s*(\d{2})", text, flags=re.I)
-    for y, yy in ranges:
-        try:
-            y1 = int(y); y2 = (y1 // 100) * 100 + int(yy)
-            years.add(str(y1)); years.add(str(y2))
-        except Exception:
-            pass
-    return years
+def add_paragraph(doc: Any, text: str):
+    if DocxDocument is None:
+        return
+    for para in textwrap.fill(text, 120).split("\n"):
+        doc.add_paragraph(para)
 
-def bump_range_token(token: str, new_start_year: int) -> str:
-    m = re.search(r"(20\d{2})\s*/\s*(\d{2})", token)
-    if not m:
-        return token
-    y1 = new_start_year; y2 = (y1 % 100) + 1
-    return re.sub(r"(20\d{2})\s*/\s*(\d{2})", f"{y1}/{y2:02d}", token)
 
-def build_rollforward_replacements(doc: "DocxDocument", new_fy: int, report_date: str) -> Dict[str, str]:
-    text_all = "\n".join(p.text for p in _iter_all_paragraphs(doc))
-    years = detect_years(text_all) or {str(new_fy - 1)}
-    repl: Dict[str, str] = {}
-    for y in years:
-        repl[f"FY{y}"] = f"FY{new_fy}"
-        repl[f"FY {y}"] = f"FY {new_fy}"
-        repl[f"FYE {y}"] = f"FYE {new_fy}"
-        repl[f"Financial Year {y}"] = f"Financial Year {new_fy}"
-        repl[f"Fiscal Year {y}"] = f"Fiscal Year {new_fy}"
-    tokens = re.findall(r"(?:FY\s*)?(20\d{2}\s*/\s*\d{2})", text_all)
-    for t in set(tokens):
-        repl[t] = bump_range_token(t, new_fy)
-    if report_date:
-        repl["Report Date"] = f"Report Date: {report_date}"
-    return repl
+def save_docx_and_return_bytes(doc: Any) -> bytes:
+    if DocxDocument is None:
+        return b""
+    with io.BytesIO() as bio:
+        doc.save(bio)
+        return bio.getvalue()
 
-# ==========================
-# Industry detection (from prior TPD text)
-# ==========================
-INDUSTRY_KEYWORDS = {
-    "ICT / Technology": [
-        "software", "it services", "saas", "cloud", "telecom", "telecommunications",
-        "data center", "ai", "machine learning", "cybersecurity", "ict", "internet", "platform"
-    ],
-    "Manufacturing": [
-        "manufactur", "production facility", "plant", "factory", "assembly", "oem", "industrial"
-    ],
-    "Agriculture / Food": [
-        "farming", "agricultur", "crop", "livestock", "food processing", "beverage", "dairy", "meat"
-    ],
-    "Energy / Utilities": [
-        "electricity", "power generation", "renewable", "oil", "gas", "pipeline", "utility", "solar", "wind"
-    ],
-    "Financial Services": [
-        "bank", "insurance", "fintech", "payment", "lending", "asset management", "securities", "brokerage"
-    ],
-    "Retail / Wholesale": [
-        "retail", "wholesale", "store", "e-commerce", "omnichannel", "merchandising", "distribution network"
-    ],
-    "Healthcare / Pharma": [
-        "pharma", "pharmaceutical", "biotech", "clinical", "medical device", "hospital", "healthcare", "diagnostic"
-    ],
-    "Transport / Logistics": [
-        "logistics", "freight", "shipping", "airline", "rail", "warehouse", "3pl", "last-mile", "fleet"
-    ],
-    "Professional Services": [
-        "consulting", "legal services", "accounting", "advisory", "engineering services", "staff augmentation"
-    ],
-}
-def detect_industry_label(text: str) -> str:
-    low = (text or "").lower()
-    scores = {label: 0 for label in INDUSTRY_KEYWORDS}
-    for label, kws in INDUSTRY_KEYWORDS.items():
-        for k in kws:
-            if k in low:
-                scores[label] += 1
-    best = max(scores.items(), key=lambda x: x[1])
-    return best[0] if best[1] > 0 else "General / Macro"
 
-# ==========================
-# Auto Industry Research (World Bank) — sector packs (open-ended default)
-# ==========================
-WB_BASE = "https://api.worldbank.org/v2"
+# ----------------- Compliance logic -----------------
 
-def wb_get_countries() -> List[Dict[str, Any]]:
-    try:
-        r = requests.get(f"{WB_BASE}/country?format=json&per_page=400", timeout=15)
-        data = r.json()
-        return data[1] if isinstance(data, list) and len(data) > 1 else []
-    except Exception:
-        return []
+def build_checklist(requirements: List[str], explanations: Dict[str, str], found_text: str) -> pd.DataFrame:
+    rows = []
+    L = found_text.lower()
+    for req in requirements:
+        present = req.lower() in L
+        rows.append({
+            "Requirement": req,
+            "Present?": "✅ Yes" if present else "❌ Missing",
+            "Explanation": explanations.get(req, "") if not present else ""
+        })
+    return pd.DataFrame(rows)
 
-def wb_resolve_country(user_input: str) -> Optional[Tuple[str, str]]:
-    ui = (user_input or "").strip().lower()
-    countries = wb_get_countries()
-    for c in countries:
-        name = (c.get("name") or "").lower()
-        iso2 = (c.get("id") or "").lower()
-        if ui == name or ui == iso2 or ui in name:
-            return (c.get("id"), c.get("name"))
-    return None
 
-# Indicator catalog (default pack + sector add-ons)
-WB_INDICATORS_PACKS: Dict[str, Dict[str, Tuple[str, str]]] = {
-    "General / Macro": {
-        "gdp_growth": ("NY.GDP.MKTP.KD.ZG", "GDP growth (annual %)"),
-        "inflation": ("FP.CPI.TOTL.ZG", "Inflation, consumer prices (annual %)"),
-        "services_share": ("NV.SRV.TOTL.ZS", "Services value added (% of GDP)"),
-        "manufacturing_share": ("NV.IND.MANF.ZS", "Manufacturing value added (% of GDP)"),
-        "industry_share": ("NV.IND.TOTL.ZS", "Industry (incl. construction) value added (% of GDP)"),
-    },
-    "ICT / Technology": {
-        "internet_users": ("IT.NET.USER.ZS", "Individuals using the Internet (% of population)"),
-        "ict_goods_exports": ("TX.VAL.ICTG.ZS.UN", "ICT goods exports (% of total goods exports)"),
-        "hightech_exports": ("TX.VAL.TECH.MF.ZS", "High-technology exports (% of manufactured exports)"),
-    },
-    "Manufacturing": {
-        "manufacturing_share": ("NV.IND.MANF.ZS", "Manufacturing value added (% of GDP)"),
-        "hightech_exports": ("TX.VAL.TECH.MF.ZS", "High-technology exports (% of manufactured exports)"),
-    },
-    "Agriculture / Food": {
-        "agri_share": ("NV.AGR.TOTL.ZS", "Agriculture, forestry, and fishing value added (% of GDP)"),
-    },
-    "Energy / Utilities": {
-        "access_electricity": ("EG.ELC.ACCS.ZS", "Access to electricity (% of population)"),
-        "renewable_output": ("EG.ELC.RNEW.ZS", "Renewable electricity output (% of total electricity output)"),
-    },
-    "Financial Services": {
-        "domestic_credit_banks": ("FS.AST.PRVT.GD.ZS", "Domestic credit to private sector by banks (% of GDP)"),
-    },
-    "Retail / Wholesale": {
-        "internet_users": ("IT.NET.USER.ZS", "Individuals using the Internet (% of population)"),
-    },
-    "Healthcare / Pharma": {
-        "internet_users": ("IT.NET.USER.ZS", "Individuals using the Internet (% of population)"),
-    },
-    "Transport / Logistics": {
-        "internet_users": ("IT.NET.USER.ZS", "Individuals using the Internet (% of population)"),
-    },
-    "Professional Services": {
-        "services_share": ("NV.SRV.TOTL.ZS", "Services value added (% of GDP)"),
-    },
-}
+# ----------------- Research (user-provided URLs only) -----------------
 
-def wb_fetch_indicator_series(iso2: str, indicator: str) -> Dict[str, Any]:
-    url = f"{WB_BASE}/country/{iso2}/indicator/{indicator}?format=json&per_page=70"
-    series = []
-    latest_year = None
-    latest_value = None
+def fetch_and_clean(url: str) -> Tuple[str, str]:
+    """Return (url, cleaned_text). Wikipedia/blogs are automatically skipped.
+    If requests/bs4 are unavailable or fetch fails, returns (url, '')."""
+    if requests is None or BeautifulSoup is None:
+        return (url, "")
+    bad_hosts = ["wikipedia.org", "/blog", "medium.com", "wordpress", "blogspot"]
+    if any(b in url.lower() for b in bad_hosts):
+        return (url, "")
     try:
         r = requests.get(url, timeout=20)
-        data = r.json()
-        if isinstance(data, list) and len(data) > 1 and isinstance(data[1], list):
-            for row in data[1]:
-                year = row.get("date"); val = row.get("value")
-                if year is None or val is None: continue
-                try:
-                    y = int(year); v = float(val)
-                except Exception:
-                    continue
-                series.append((y, v))
-            series.sort()
-            for y, v in reversed(series):
-                latest_year, latest_value = y, v
-                break
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "lxml")
+        for s in soup(["script", "style", "nav", "footer", "header"]):
+            s.extract()
+        text = " ".join(soup.get_text(" ").split())
+        return (url, text)
     except Exception:
-        pass
-    return {"latest_year": latest_year, "latest_value": latest_value, "series": series, "source_url": url}
+        return (url, "")
 
-def auto_sector_research(country_input: str, industry_label: str) -> Dict[str, Any]:
-    resolved = wb_resolve_country(country_input)
-    if not resolved:
-        return {"note": "Could not resolve country; please use a standard name (e.g., Singapore).", "items": {}}
-    iso2, country_name = resolved
-    pack = {**WB_INDICATORS_PACKS["General / Macro"], **WB_INDICATORS_PACKS.get(industry_label, {})}
-    out = {"country": country_name, "iso2": iso2, "industry": industry_label, "items": {}, "notes": []}
-    for key, (code, label) in pack.items():
-        data = wb_fetch_indicator_series(iso2, code)
-        out["items"][key] = {**data, "code": code, "label": f"World Bank — {label}"}
-        if data["latest_year"] is None:
-            out["notes"].append(f"Missing recent data: {label}")
-    return out
 
-def format_sector_update_text(sector_pack: Dict[str, Any]) -> Tuple[List[str], List[Tuple[int, str]]]:
-    lines: List[str] = []
-    foots: List[Tuple[int, str]] = []
-    if not sector_pack or "items" not in sector_pack: return lines, foots
-    items = sector_pack["items"]
+def summarise_text_blocks(blocks: List[str], max_chars: int = 2000) -> str:
+    text = "\n\n".join(blocks)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "..."
 
-    def add_line(key: str, fmt: str):
-        if key in items and items[key]["latest_year"] is not None:
-            y = items[key]["latest_year"]; v = items[key]["latest_value"]; url = items[key]["source_url"]
-            try:
-                lines.append(fmt.format(v=float(v), y=int(y)))
-            except Exception:
-                lines.append(fmt.format(v=v, y=y))
-            foots.append((len(foots) + 1, url))
 
-    # General
-    add_line("gdp_growth", "GDP growth: {v:.1f}% in {y}.")
-    add_line("inflation", "Inflation (CPI): {v:.1f}% in {y}.")
-    add_line("services_share", "Services share of GDP: {v:.1f}% (in {y}).")
-    add_line("manufacturing_share", "Manufacturing share of GDP: {v:.1f}% (in {y}).")
-    add_line("industry_share", "Industry (incl. construction) share of GDP: {v:.1f}% (in {y}).")
+# ----------------- Industry charts -----------------
 
-    # ICT/Tech
-    add_line("internet_users", "Internet usage: {v:.1f}% of population (in {y}).")
-    add_line("ict_goods_exports", "ICT goods exports: {v:.1f}% of total goods exports (in {y}).")
-    add_line("hightech_exports", "High-tech exports: {v:.1f}% of manufactured exports (in {y}).")
+def make_simple_chart_png(title: str, series: List[Tuple[str, float]]) -> Optional[bytes]:
+    if plt is None:
+        return None
+    labels = [k for k, _ in series]
+    values = [v for _, v in series]
+    fig, ax = plt.subplots()
+    ax.bar(labels, values)
+    ax.set_title(title)
+    ax.set_xlabel("Category")
+    ax.set_ylabel("Value")
+    fig.tight_layout()
+    with io.BytesIO() as bio:
+        fig.savefig(bio, format="png", dpi=160)
+        plt.close(fig)
+        return bio.getvalue()
 
-    # Agriculture
-    add_line("agri_share", "Agriculture, forestry & fishing: {v:.1f}% of GDP (in {y}).")
 
-    # Energy
-    add_line("access_electricity", "Access to electricity: {v:.1f}% of population (in {y}).")
-    add_line("renewable_output", "Renewable electricity output: {v:.1f}% of total electricity output (in {y}).")
+# ------------------------------------------------------------
+# Sidebar — Guideline Pack loader + Function picker
+# ------------------------------------------------------------
 
-    # Finance
-    add_line("domestic_credit_banks", "Domestic credit to private sector by banks: {v:.1f}% of GDP (in {y}).")
+with st.sidebar:
+    st.header("⚙️ Settings")
+    gp_file = st.file_uploader("Load Guideline Pack (JSON/YAML). If omitted, a starter pack is used.", type=["json", "yaml", "yml"])
+    GP = load_guideline_pack(gp_file)
 
-    return lines, foots
-
-def fetch_title(url: str) -> str:
-    try:
-        r = requests.get(url, timeout=10)
-        soup = BeautifulSoup(r.text, "html.parser")
-        title = soup.title.string.strip() if soup.title and soup.title.string else url
-        return title[:120]
-    except Exception:
-        return url
-
-# ==========================
-# PAGE: TPD Draft (industry-aware + roll-forward vs rewrite)
-# ==========================
-if page == "TPD Draft":
-    st.title("TPD Draft Generator")
-    st.write("Upload prior-year TPD as **Microsoft Word (.docx or .doc)** to preserve fonts/colours/sizes. PDFs are supported but styles cannot be preserved.")
-
-    prior = st.file_uploader(
-        "Upload Prior TPD (DOCX/DOC preferred; PDF supported as JSON fallback)",
-        type=["docx", "doc", "pdf"],
-        accept_multiple_files=False
+    # Function selector
+    function = st.selectbox(
+        "Choose function",
+        [
+            "1. RPT Analyser",
+            "2. Compliance Checker",
+            "3. Information Request Generator",
+            "4. TPD Generator",
+            "5. Master File Generator",
+            "6. Industry Analysis Generator",
+        ],
+        index=0,
     )
 
-    colA, colB, colC = st.columns(3)
-    with colA:
-        new_fy = st.number_input("New FY (e.g., 2024)", min_value=1990, max_value=2100, value=2024)
-    with colB:
-        report_date = st.text_input("Report date (optional, e.g., 30 June 2025)", value="")
-    with colC:
-        override_country = st.text_input("Country for auto research", value="Singapore")
+    # Country selector (used by most tools)
+    jlist = sorted([k for k in GP.get("jurisdictions", {}).keys() if k != "OECD"]) or ["Singapore"]
+    country = st.selectbox("Jurisdiction", jlist)
 
-    # Industry analysis mode
-    st.subheader("Industry Analysis Mode")
-    industry_mode = st.radio(
-        "How should we handle Industry Analysis?",
-        ["Roll-forward (update facts & stats)", "Full Rewrite"],
-        help="Roll-forward: update outdated numbers and citations only, keeping prior narrative. Full Rewrite: rebuild the section from scratch."
+    st.caption("Jurisdiction packs are pluggable. Upload a richer pack to cover all local rules.")
+
+
+J = GP.get("jurisdictions", {}).get(country, {})
+OECD = GP.get("jurisdictions", {}).get("OECD", GP.get("oecd", {}))
+
+# ------------------------------------------------------------
+# 1) RPT Analyser
+# ------------------------------------------------------------
+if function.startswith("1."):
+    st.subheader("1) RPT Analyser — Does a TPD need to be prepared?")
+    st.write(
+        "Upload the client's audited financial statements (PDF/DOCX/TXT). The app scans income statements and related party disclosures, maps amounts, and compares against the jurisdiction's indicative thresholds."
     )
+    fs_file = st.file_uploader("Financial statements (PDF/DOCX/TXT)", type=["pdf", "docx", "txt"])
 
-    # Detect industry from prior TPD text
-    detected_industry = "General / Macro"
-    prior_text_for_detection = ""
-    if prior is not None:
-        name = prior.name.lower()
-        if name.endswith(".docx"):
-            prior_text_for_detection = read_docx_text_bytes(prior.getvalue())
-        elif name.endswith(".doc"):
-            try:
-                converted = convert_doc_to_docx_bytes(prior.getvalue())
-                prior_text_for_detection = read_docx_text_bytes(converted)
-            except Exception:
-                prior_text_for_detection = ""
-        elif name.endswith(".pdf"):
-            prior_text_for_detection = read_pdf(io.BytesIO(prior.getvalue()))
-        detected_industry = detect_industry_label(prior_text_for_detection)
+    if fs_file is not None:
+        text = extract_text(fs_file)
+        st.markdown("**Quick text preview (first 1000 chars):**")
+        st.code(text[:1000] + ("..." if len(text) > 1000 else ""))
 
-    st.write("**Detected industry (from prior TPD, editable):**")
-    industry_choice = st.selectbox(
-        "Industry",
-        options=list(WB_INDICATORS_PACKS.keys()),
-        index=list(WB_INDICATORS_PACKS.keys()).index(detected_industry) if detected_industry in WB_INDICATORS_PACKS else 0,
-        help="Auto-detected from prior TPD text. You can override."
-    )
-
-    # Additional information options
-    mode = st.radio("Additional information available?", [
-        "No information",
-        "Client information request",
-        "Benchmark study",
-        "Both (IRL + Benchmark)",
-    ])
-
-    bench_df: Optional[pd.DataFrame] = None
-    irl_text: Optional[str] = None
-
-    if mode in ("Benchmark study", "Both (IRL + Benchmark)"):
-        bench_file = st.file_uploader("Attach benchmark export (CSV/XLSX)", type=["csv", "xlsx"], key="bench")
-        if bench_file is not None:
-            try:
-                bench_df = pd.read_csv(bench_file) if bench_file.name.endswith(".csv") else pd.read_excel(bench_file)
-                st.caption("Loaded benchmark for inclusion in draft.")
-            except Exception as e:
-                st.error(f"Could not read benchmark: {e}")
-
-    if mode in ("Client information request", "Both (IRL + Benchmark)"):
-        irl_up = st.file_uploader("Attach client info (TXT/CSV) to insert", type=["txt", "csv"], key="irl")
-        if irl_up is not None:
-            try:
-                if irl_up.name.endswith(".csv"):
-                    _df = pd.read_csv(irl_up)
-                    irl_text = "\n".join("- " + " | ".join(map(str, row)) for _, row in _df.iterrows())
-                else:
-                    irl_text = irl_up.read().decode("utf-8", errors="ignore")
-                st.caption("Loaded client information for inclusion.")
-            except Exception as e:
-                st.error(f"Could not read client info: {e}")
-
-    # Open-ended sources: user URLs + uploaded reports (we will cite titles/URLs)
-    st.subheader("Industry sources (optional)")
-    st.write("We will auto-research official stats by default (World Bank). You can also add specific URLs and upload reports.")
-    urls = st.text_area("Extra source URLs (one per line, optional)", value="")
-    user_url_list = [u.strip() for u in urls.splitlines() if u.strip()]
-    user_reports = st.file_uploader("Upload market/industry reports (PDF/DOCX/TXT — optional)", type=["pdf","docx","txt"], accept_multiple_files=True)
-
-    # Advanced text replacements
-    adv = st.expander("Advanced: custom replacements (JSON)", expanded=False)
-    with adv:
-        st.write('Example: {"{{ENTITY}}": "ABC Pte Ltd", "{{COUNTRY}}": "Singapore"}')
-        repl_json = st.text_area("Key-value JSON (optional)", value="")
-
-    if st.button("Generate TPD draft now", type="primary"):
-        if prior is None:
-            st.error("Please upload a prior TPD (Word .docx/.doc preferred).")
+        st.markdown("### Detected related party amounts (heuristic)")
+        rpts = find_amounts_near_keywords(text, SECTION_SYNONYMS["related_party"])  # (currency, amount, snippet)
+        df = pd.DataFrame(rpts, columns=["Currency", "Amount", "Evidence snippet"])
+        if df.empty:
+            st.info("No candidate related party amounts found. Try uploading another format (e.g., the notes section PDF).")
         else:
-            # 1) Auto sector research tailored to chosen industry (default credible source)
-            sector_pack = auto_sector_research(override_country, industry_choice)
-            auto_lines, auto_foots = format_sector_update_text(sector_pack)
-
-            # 2) Parse advanced replacements
-            user_repl: Dict[str, str] = {}
-            if repl_json.strip():
-                try:
-                    user_repl = json.loads(repl_json)
-                    if not isinstance(user_repl, dict):
-                        st.warning("Custom replacements must be a JSON object (key-value). Ignored.")
-                        user_repl = {}
-                except Exception:
-                    st.warning("Invalid JSON for custom replacements. Ignored.")
-                    user_repl = {}
-
-            # 3) Prepare DOCX/PDF flows
-            name = prior.name.lower()
-            is_docx = name.endswith(".docx") and (DocxDocument is not None)
-            is_doc = name.endswith(".doc")
-            is_pdf = name.endswith(".pdf")
-
-            prior_buffer = io.BytesIO(prior.getvalue())
-            if is_doc:
-                try:
-                    converted = convert_doc_to_docx_bytes(prior.getvalue())
-                    prior_buffer = io.BytesIO(converted)
-                    is_docx = True
-                    st.info("Converted legacy .doc file to .docx for processing.")
-                except Exception as e:
-                    st.error(str(e))
-                    is_docx = False
-
-            # 4) DOCX path (formatting preserved)
-            if is_docx:
-                if DocxDocument is None:
-                    st.error("python-docx is not available in this environment.")
-                else:
-                    doc = DocxDocument(prior_buffer)
-                    auto_repl = build_rollforward_replacements(doc, int(new_fy), report_date.strip())
-                    auto_repl.update(user_repl)
-                    hits = docx_replace_text_everywhere(doc, auto_repl)
-
-                    # Conditional inserts
-                    if bench_df is not None and not bench_df.empty:
-                        acc = (bench_df.get("Decision", "").astype(str).str.lower() == "accept").sum()
-                        rej = (bench_df.get("Decision", "").astype(str).str.lower() == "reject").sum()
-                        summary = f"Vendor study summary: {acc} accepted, {rej} rejected, {len(bench_df)} total comparables."
-                        p = doc.add_paragraph()
-                        p.add_run("\nEconomic Analysis — Benchmark Update: ").bold = True
-                        doc.add_paragraph(summary)
-
-                    if irl_text:
-                        p = doc.add_paragraph()
-                        p.add_run("\nClient Information Provided:").bold = True
-                        for line in irl_text.splitlines():
-                            if line.strip():
-                                doc.add_paragraph("• " + line.strip())
-
-                    # --- Industry Update (mode-aware) ---
-                    doc.add_paragraph()
-                    doc.add_paragraph(f"Industry Update — {industry_choice}")
-
-                    # In Roll-forward mode: add concise “updates only” preface
-                    if industry_mode.startswith("Roll-forward"):
-                        doc.add_paragraph("The prior-year narrative is retained. The facts and figures below are refreshed for the current period:")
-
-                    # Auto lines from credible defaults (World Bank)
-                    if auto_lines:
-                        for ln in auto_lines:
-                            doc.add_paragraph(f"- {ln}")
-
-                    # User URLs appended (titles + footnotes)
-                    foots: List[Tuple[int, str]] = []
-                    if auto_foots:
-                        foots.extend(auto_foots)
-
-                    if user_url_list:
-                        for u in user_url_list:
-                            title = fetch_title(u)
-                            doc.add_paragraph(f"- See: {title}")
-                            foots.append((len(foots) + 1, u))
-
-                    # Uploaded reports: list them as sources (we’re not parsing content in this open-ended version)
-                    if user_reports:
-                        for f in user_reports:
-                            label = getattr(f, "name", "uploaded report")
-                            doc.add_paragraph(f"- See: {label}")
-                            foots.append((len(foots) + 1, f"uploaded://{label}"))
-
-                    if foots:
-                        doc.add_paragraph("Sources:")
-                        for i, url in foots:
-                            doc.add_paragraph(f"  ^{i} {url}")
-
-                    out = io.BytesIO(); doc.save(out); out.seek(0)
-                    st.download_button(
-                        "Download Draft (DOCX)",
-                        data=out.getvalue(),
-                        file_name="TPD_Draft.docx",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    )
-                    st.success(f"Draft generated. Replacements applied: {hits}")
-
-            # 5) PDF path (JSON fallback)
-            elif is_pdf:
-                text = read_pdf(prior_buffer)
-                payload = {
-                    "note": "PDF input: style not preserved. Upload .docx to keep formatting.",
-                    "new_fy": int(new_fy),
-                    "report_date": report_date.strip(),
-                    "industry": industry_choice,
-                    "country": override_country,
-                    "analysis_mode": industry_mode,
-                    "auto_research": {"lines": auto_lines, "sources": [u for _, u in auto_foots]},
-                    "irl": irl_text,
-                }
-                if bench_df is not None and not bench_df.empty:
-                    acc = (bench_df.get("Decision", "").astype(str).str.lower() == "accept").sum()
-                    rej = (bench_df.get("Decision", "").astype(str).str.lower() == "reject").sum()
-                    payload["benchmark_summary"] = f"{acc} accepted, {rej} rejected, {len(bench_df)} total"
-                if user_url_list:
-                    payload["user_sources"] = user_url_list
-                if user_reports:
-                    payload["uploaded_reports"] = [getattr(f, "name", "report") for f in user_reports]
-
-                st.download_button(
-                    "Download Draft (JSON)",
-                    data=json.dumps(payload, indent=2).encode("utf-8"),
-                    file_name="TPD_Draft.json",
-                    mime="application/json",
-                )
-                st.info("To preserve fonts/colours, please upload a Word .docx file.")
-
-            else:
-                st.error("Unsupported file type. Please upload .docx, .doc, or .pdf.")
-
-# ==========================
-# Other pages (kept simple)
-# ==========================
-elif page == "TNMM Review":
-    st.title("TNMM Benchmark Review (demo)")
-    up = st.file_uploader("Upload Benchmark (CSV/XLSX)", type=["csv", "xlsx"])
-    if up:
-        try:
-            df = pd.read_csv(up) if up.name.endswith(".csv") else pd.read_excel(up)
             st.dataframe(df)
-            if "Decision" in df.columns and "Reason" in df.columns:
-                flags = df[(df["Decision"].astype(str).str.lower() == "reject") & (df["Reason"].astype(str).str.strip() == "")]
-                st.subheader("⚠️ Rejects with empty reason")
-                st.dataframe(flags)
-                if not flags.empty:
-                    st.download_button(
-                        "Download flags (CSV)",
-                        data=flags.to_csv(index=False).encode("utf-8"),
-                        file_name="tnmm_flags.csv",
-                        mime="text/csv",
-                    )
-        except Exception as e:
-            st.error(f"Could not read file: {e}")
 
-elif page == "CUT/CUP Review":
-    st.title("CUT / CUP Agreements Review (demo)")
-    st.info("Clause extraction + scoring can be wired next; current focus is the TPD generator.")
+        st.markdown("### Threshold comparison")
+        thresholds = J.get("tpd_thresholds", [])
+        if not thresholds:
+            st.warning("No thresholds in the current jurisdiction pack. Upload a richer pack or edit STARTER_PACK.")
+        else:
+            hits = []
+            for _, row in df.iterrows():
+                cur, amt = row["Currency"], float(row["Amount"])
+                for th in thresholds:
+                    # Very naive currency handling: only compare if same currency token appears. In production, convert FX.
+                    same_currency = (cur and th.get("currency") and cur.upper().strip("$")[:3] == th["currency"]) or (not cur)
+                    if same_currency and th.get("threshold") is not None and amt >= float(th["threshold"]):
+                        hits.append({
+                            "Transaction": row["Evidence snippet"][:80] + ("..." if len(row["Evidence snippet"])>80 else ""),
+                            "Amount": amt,
+                            "Currency": cur or th.get("currency", ""),
+                            "Exceeded threshold": th["threshold"],
+                            "Threshold label": th.get("label", ""),
+                            "Guidance ref": th.get("guidance_ref", ""),
+                            "Source": th.get("citation_url", "")
+                        })
+            hit_df = pd.DataFrame(hits)
+            if hit_df.empty:
+                st.success("No items exceeded the configured thresholds (based on detected figures).")
+            else:
+                st.error("Some items appear to exceed indicative thresholds. These should be covered in the TPD.")
+                st.dataframe(hit_df)
+                st.download_button("Download flagged items (CSV)", hit_df.to_csv(index=False).encode("utf-8"), file_name=f"rpt_threshold_flags_{country}.csv", mime="text/csv")
 
-elif page == "Information Request List":
-    st.title("Information Request List (IRL)")
-    industry = st.text_input("Industry", value="Technology / Services")
-    transactions = st.text_area("Transactions in-scope (comma-separated)", value="intra-group services, distribution")
-    if st.button("Generate IRL"):
-        required = {
-            "financials": ["Trial balance FY", "Segmented P&L by service line", "Intercompany charges by counterparty"],
-            "legal": ["Latest org chart", "All intercompany agreements", "Board minutes re: restructuring"],
-            "operational": ["Headcount by function", "KPIs / cost drivers", "Descriptions of services performed"],
+        st.markdown("---")
+        st.caption("Note: detection is heuristic; for best results, also upload the Notes to the FS where related party disclosures typically appear.")
+
+# ------------------------------------------------------------
+# 2) Compliance Checker
+# ------------------------------------------------------------
+elif function.startswith("2."):
+    st.subheader("2) Compliance Checker — Validate a TPD against local rules")
+    st.write("Upload a TPD (DOCX/PDF/TXT), select the jurisdiction, and get a checklist of required elements.")
+
+    tpd_file = st.file_uploader("TPD file", type=["docx", "pdf", "txt"])
+    include_oecd = st.checkbox("Include OECD Local File list in checklist", value=True)
+
+    if tpd_file is not None:
+        text = extract_text(tpd_file)
+        st.markdown("**Quick text preview (first 1000 chars):**")
+        st.code(text[:1000] + ("..." if len(text) > 1000 else ""))
+
+        reqs = list(J.get("local_file_requirements", []))
+        if include_oecd:
+            reqs = list(dict.fromkeys(reqs + OECD.get("local_file_requirements", [])))  # de-dup while preserving order
+        expl = J.get("compliance_explanations", {})
+
+        if not reqs:
+            st.warning("No requirement list found for this jurisdiction pack. Upload a richer pack.")
+        else:
+            checklist = build_checklist(reqs, expl, text)
+            st.dataframe(checklist)
+            st.download_button("Download checklist (CSV)", checklist.to_csv(index=False).encode("utf-8"), file_name=f"tpd_compliance_check_{country}.csv", mime="text/csv")
+
+        st.markdown("---")
+        st.caption("This is a rule-based presence check. Depth/quality reviews still require professional judgement.")
+
+# ------------------------------------------------------------
+# 3) Information Request Generator
+# ------------------------------------------------------------
+elif function.startswith("3."):
+    st.subheader("3) Information Request Generator — Excel or Word")
+    st.write("Upload last year's request list or TPD to roll-forward questions, plus auto-add jurisdictional asks.")
+
+    last_year = st.file_uploader("Prior IR list / TPD (DOCX/PDF/TXT/CSV/XLSX)", type=["docx", "pdf", "txt", "csv", "xlsx"])
+    target_year = st.number_input("Target FY (e.g., 2024)", min_value=1990, max_value=2100, value=datetime.date.today().year)
+    out_fmt = st.selectbox("Output format", ["Excel (.xlsx)", "Word (.docx)"])
+
+    base_questions = J.get("info_request_questions", [])
+
+    # Extract prior questions
+    prior_text = ""
+    if last_year is not None:
+        name = last_year.name.lower()
+        if name.endswith(".xlsx") and openpyxl is not None:
+            wb = openpyxl.load_workbook(io.BytesIO(_read_file_bytes(last_year)))
+            ws = wb.active
+            vals = []
+            for row in ws.iter_rows(values_only=True):
+                for cell in row:
+                    if isinstance(cell, str):
+                        vals.append(cell)
+            prior_text = "\n".join(vals)
+        elif name.endswith(".csv"):
+            try:
+                df0 = pd.read_csv(io.BytesIO(_read_file_bytes(last_year)))
+                prior_text = "\n".join(df0.astype(str).fillna("").agg(" ".join, axis=1).tolist())
+            except Exception:
+                prior_text = extract_text(last_year)
+        else:
+            prior_text = extract_text(last_year)
+
+    # Roll-forward year tokens
+    def bump_years(text: str, to_year: int) -> List[str]:
+        if not text:
+            return []
+        years = sorted({int(y) for y in YEAR_RE.findall(text)})
+        qs = []
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        for l in lines:
+            q = l
+            for y in years:
+                q = q.replace(str(y), str(to_year))
+            # Specific phrasing bump
+            q = re.sub(r"FY\s*20\d{2}", f"FY {to_year}", q)
+            qs.append(q)
+        return qs
+
+    rolled = bump_years(prior_text, target_year)
+    # Merge with base questions
+    compiled = list(dict.fromkeys(rolled + [q.format(YEAR=target_year) for q in base_questions]))
+
+    st.markdown("### Preview")
+    if compiled:
+        st.write("\n".join(f"• {q}" for q in compiled[:50]))
+        if len(compiled) > 50:
+            st.caption(f"(+{len(compiled)-50} more)")
+
+    if st.button("Generate & Download"):
+        if out_fmt.startswith("Excel"):
+            if not _ensure_pkg("openpyxl", openpyxl, "pip install openpyxl"):
+                st.stop()
+            wb = Workbook()
+            ws = wb.active
+            ws.title = f"IR FY{target_year}"
+            ws.append(["#", "Question"])
+            for i, q in enumerate(compiled, 1):
+                ws.append([i, q])
+            with io.BytesIO() as bio:
+                wb.save(bio)
+                st.download_button("Download IR (.xlsx)", bio.getvalue(), file_name=f"IR_FY{target_year}_{country}.xlsx")
+        else:
+            if not _ensure_pkg("python-docx", DocxDocument, "pip install python-docx"):
+                st.stop()
+            doc = DocxDocument()
+            add_heading(doc, f"Information Request — FY {target_year} ({country})", 1)
+            for i, q in enumerate(compiled, 1):
+                doc.add_paragraph(f"{i}. {q}")
+            st.download_button("Download IR (.docx)", save_docx_and_return_bytes(doc), file_name=f"IR_FY{target_year}_{country}.docx")
+
+# ------------------------------------------------------------
+# 4) TPD Generator
+# ------------------------------------------------------------
+elif function.startswith("4."):
+    st.subheader("4) TPD Generator — Fresh or Roll-forward")
+    mode = st.radio("Mode", ["Fresh", "Roll-forward"], horizontal=True)
+    target_year = st.number_input("Target FY (e.g., 2024)", min_value=1990, max_value=2100, value=datetime.date.today().year)
+
+    template_docx = st.file_uploader("Template (.docx) — required to preserve your formatting", type=["docx"])
+    info_list_file = st.file_uploader("Information request list / client inputs (optional)", type=["docx", "pdf", "txt", "csv", "xlsx"], key="tpd_ir")
+    urls_text = st.text_area("Optional: paste credible URLs (one per line) to cite for company/group overview and industry context (no blogs/Wikipedia).", height=120)
+
+    company_name = st.text_input("Client/Entity name (for placeholders like {{CLIENT_NAME}})")
+
+    if mode == "Fresh":
+        st.markdown("**Placeholders supported**: {{CLIENT_NAME}}, {{FY}}, {{COUNTRY}}, plus any custom placeholders in your template.")
+        st.caption("The app will also append an Industry Analysis section if provided.")
+
+    else:
+        prior_tpd = st.file_uploader("Prior year TPD (.docx) to roll forward", type=["docx"], key="roll_doc")
+        st.write("This will replace year mentions and update simple numeric tokens. You can also merge new content.")
+
+    if st.button("Generate TPD (.docx)"):
+        if not _ensure_pkg("python-docx", DocxDocument, "pip install python-docx"):
+            st.stop()
+        if template_docx is None:
+            st.error("Please provide a DOCX template.")
+            st.stop()
+        # Load template
+        tdoc = DocxDocument(io.BytesIO(_read_file_bytes(template_docx)))
+
+        # Collect optional research content
+        urls = [u.strip() for u in (urls_text or "").splitlines() if u.strip()]
+        fetched = []
+        for u in urls:
+            url, text = fetch_and_clean(u)
+            if text:
+                fetched.append((url, text))
+        research_summary = summarise_text_blocks([t for _, t in fetched], 1800)
+
+        # Build mapping
+        mapping = {
+            "{{CLIENT_NAME}}": company_name or "",
+            "{{FY}}": str(target_year),
+            "{{COUNTRY}}": country,
         }
-        email = (
-            f"Dear Client,\n\nTo complete the FY TPD update for {industry}, please provide the following:\n- "
-            + "\n- ".join(sum(required.values(), []))
-            + "\n\nTransactions in scope: "
-            + transactions
-            + "\n\nKind regards,\nTP Team"
-        )
-        out = {"requests": required, "email": email}
-        st.json(out)
-        st.download_button(
-            "Download IRL (JSON)",
-            data=json.dumps(out, indent=2).encode("utf-8"),
-            file_name="info_requests.json",
-            mime="application/json",
-        )
+        replace_text_in_docx(tdoc, mapping)
 
+        # Append sections (industry analysis if any URLs provided)
+        if urls:
+            add_heading(tdoc, "Industry Analysis", 1)
+            add_paragraph(tdoc, f"Jurisdiction: {country}. Year: {target_year}.")
+            if research_summary:
+                add_paragraph(tdoc, research_summary)
+            # Simple demo chart (user may replace with real metrics)
+            if plt is not None:
+                png = make_simple_chart_png("Illustrative market trend", [("Y-2", 100), ("Y-1", 110), ("Y", 130)])
+                if png:
+                    tdoc.add_picture(io.BytesIO(png), width=Inches(5.5))
+            # Footnotes
+            if fetched:
+                add_heading(tdoc, "References", 2)
+                for i, (u, _) in enumerate(fetched, 1):
+                    tdoc.add_paragraph(f"[{i}] {u}")
+
+        # Merge any info list content as an appendix
+        if info_list_file is not None:
+            add_heading(tdoc, "Appendix — Client Inputs", 1)
+            info_text = extract_text(info_list_file)
+            add_paragraph(tdoc, info_text[:3000] + ("..." if len(info_text) > 3000 else ""))
+
+        st.download_button("Download TPD (.docx)", save_docx_and_return_bytes(tdoc), file_name=f"TPD_{company_name or 'Client'}_{country}_FY{target_year}.docx")
+
+    if function.startswith("4.") and st.checkbox("Show template tips", value=False):
+        st.info("Use unique placeholders like {{CLIENT_NAME}} in your template. This app will replace them while keeping fonts/colors.")
+
+# ------------------------------------------------------------
+# 5) Master File Generator
+# ------------------------------------------------------------
+elif function.startswith("5."):
+    st.subheader("5) Master File Generator — Based on OECD + local requirements")
+    template_docx = st.file_uploader("Master file template (.docx)", type=["docx"], key="mf_tpl")
+    urls_text = st.text_area("Optional: paste credible URLs for group-level industry/market context.", height=120, key="mf_urls")
+    group_name = st.text_input("Group name (for {{GROUP_NAME}})")
+    target_year = st.number_input("Target FY (e.g., 2024)", min_value=1990, max_value=2100, value=datetime.date.today().year, key="mf_year")
+
+    if st.button("Generate Master File (.docx)"):
+        if not _ensure_pkg("python-docx", DocxDocument, "pip install python-docx"):
+            st.stop()
+        if template_docx is None:
+            st.error("Please provide a DOCX template.")
+            st.stop()
+        doc = DocxDocument(io.BytesIO(_read_file_bytes(template_docx)))
+        mapping = {
+            "{{GROUP_NAME}}": group_name or "",
+            "{{FY}}": str(target_year),
+            "{{COUNTRY}}": country,
+        }
+        replace_text_in_docx(doc, mapping)
+
+        reqs = list(dict.fromkeys(OECD.get("master_file_requirements", []) + J.get("master_file_requirements", [])))
+        if reqs:
+            add_heading(doc, "Compliance checklist (OECD + local)", 1)
+            for r in reqs:
+                doc.add_paragraph(f"• {r}")
+
+        urls = [u.strip() for u in (urls_text or "").splitlines() if u.strip()]
+        fetched = []
+        for u in urls:
+            url, text = fetch_and_clean(u)
+            if text:
+                fetched.append((u, text))
+        if fetched:
+            add_heading(doc, "Industry/Market Context (summary)", 1)
+            add_paragraph(doc, summarise_text_blocks([t for _, t in fetched], 2000))
+            add_heading(doc, "References", 2)
+            for i, (u, _) in enumerate(fetched, 1):
+                doc.add_paragraph(f"[{i}] {u}")
+
+        st.download_button("Download Master File (.docx)", save_docx_and_return_bytes(doc), file_name=f"MasterFile_{group_name or 'Group'}_{country}_FY{target_year}.docx")
+
+# ------------------------------------------------------------
+# 6) Industry Analysis Generator
+# ------------------------------------------------------------
 else:
-    st.title("Advisory / Opportunity Spotting (demo)")
-    st.info("Upload a benchmark on the TNMM page to explore opportunities; simplified here.")
+    st.subheader("6) Industry Analysis Generator — Credible sources only")
+    st.write("Select industry, country, and (optionally) provide URLs. The app drafts a DOCX with charts and footnotes.")
 
+    industries_common = [
+        "Software/SaaS", "Semiconductors", "Consumer Electronics", "Automotive OEM", "Auto Components",
+        "Logistics/3PL", "E-commerce", "Retail (Apparel)", "Food & Beverage Manufacturing", "Pulp & Paper",
+        "Banking", "Insurance", "Asset Management", "Healthcare Providers", "Pharmaceuticals",
+        "Oil & Gas Upstream", "Oil & Gas Downstream", "Renewable Energy (Solar)", "Renewable Energy (Wind)",
+        "Telecommunications", "Construction", "Real Estate (Developers)", "Mining", "Aviation",
+    ]
 
+    chosen = st.selectbox("Industry", industries_common + ["Others (type below)"])
+    other = st.text_input("If 'Others', specify")
+    industry = other.strip() if chosen.startswith("Others") else chosen
 
+    urls_text = st.text_area("Paste credible URLs (gov, IFIs, exchanges, company filings). One per line.", height=160)
 
+    add_demo_chart = st.checkbox("Include an illustrative chart (demo numbers)", value=True)
 
+    if st.button("Generate Industry Write-up (.docx)"):
+        if not _ensure_pkg("python-docx", DocxDocument, "pip install python-docx"):
+            st.stop()
+        doc = DocxDocument()
+        add_heading(doc, f"Industry Analysis — {industry}", 1)
+        add_paragraph(doc, f"Jurisdiction: {country}.")
+        add_paragraph(doc, "This section summarises current market dynamics, key drivers, competitive landscape, and regulatory context, with footnoted sources.")
 
+        urls = [u.strip() for u in (urls_text or "").splitlines() if u.strip()]
+        fetched = []
+        for u in urls:
+            url, text = fetch_and_clean(u)
+            if text:
+                fetched.append((url, text))
+        if fetched:
+            add_heading(doc, "Narrative (summary)", 2)
+            add_paragraph(doc, summarise_text_blocks([t for _, t in fetched], 2200))
 
+        if add_demo_chart and plt is not None:
+            png = make_simple_chart_png("Illustrative KPI trend", [("Y-3", 95), ("Y-2", 102), ("Y-1", 108), ("Y", 121)])
+            if png:
+                doc.add_picture(io.BytesIO(png), width=Inches(5.5))
+
+        if fetched:
+            add_heading(doc, "References", 2)
+            for i, (u, _) in enumerate(fetched, 1):
+                doc.add_paragraph(f"[{i}] {u}")
+
+        st.download_button("Download Industry Analysis (.docx)", save_docx_and_return_bytes(doc), file_name=f"Industry_{industry.replace(' ', '_')}_{country}.docx")
+
+# ------------------------------------------------------------
+# Footer / Notes
+# ------------------------------------------------------------
+st.markdown("---")
+st.caption(
+    "This prototype focuses on core workflows and preserves your template formatting. "
+    "For production, extend the Guideline Pack with full jurisdiction rules (thresholds, checklists, examples), "
+    "add FX conversion logic, and harden parsing for multilingual PDFs."
+)
