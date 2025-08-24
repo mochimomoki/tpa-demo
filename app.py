@@ -228,6 +228,56 @@ if page=="TPD Draft":
             for ln in lines: draft+=f"\n- {ln}"
             if user_url_list: draft+="\nExtra sources:\n"+"\n".join(user_url_list)
             st.text_area("Preview Draft",draft,height=300)
+            from docx import Document
+
+if st.button("Generate TPD Draft", type="primary"):
+    if prior is None:
+        st.error("Upload a TPD first")
+    else:
+        detected_sections=["FAR","Economic Analysis","Related Party Transactions"]  
+        issues=check_jurisdiction_compliance(country_choice,detected_sections,revenue=20000000)
+
+        if issues:
+            st.warning("⚠️ Compliance Gaps Found:")
+            for i in issues:
+                st.write(f"- {i}")
+        else:
+            st.success(f"Draft complies with {country_choice} guidelines.")
+
+        # Industry lines
+        resolved=wb_resolve_country(country_choice)
+        lines=format_sector_update_text(resolved[0]) if resolved else []
+
+        # --- Create Word document ---
+        doc=Document()
+        doc.add_heading("Transfer Pricing Documentation — Draft", level=1)
+        doc.add_paragraph(f"Jurisdiction: {country_choice}")
+        doc.add_paragraph(f"New FY: {new_fy}")
+        doc.add_paragraph(f"FYE: {fye_date}")
+        doc.add_paragraph(f"Industry: {industry_choice}")
+        doc.add_paragraph(f"Industry Analysis Mode: {industry_mode}")
+
+        doc.add_heading("Industry Update", level=2)
+        for ln in lines:
+            doc.add_paragraph(ln)
+
+        if user_url_list:
+            doc.add_heading("Additional Sources", level=2)
+            for u in user_url_list:
+                doc.add_paragraph(u)
+
+        # Save to buffer
+        out=io.BytesIO()
+        doc.save(out)
+        out.seek(0)
+
+        st.download_button(
+            "Download Draft TPD (DOCX)",
+            data=out,
+            file_name="TPD_Draft.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+
 
 # ==========================
 # Other pages (TNMM, CUT/CUP, IRL, Advisory)
