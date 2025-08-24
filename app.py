@@ -1,3 +1,5 @@
+23/08/25 - 2:09am (perf but need to change structure)
+
 # app.py — TPD Draft Generator (industry-aware + roll-forward vs rewrite + DOCX formatting + .DOC conversion)
 from __future__ import annotations
 import io, re, json, os, subprocess, tempfile
@@ -393,56 +395,21 @@ if page == "TPD Draft":
     st.title("TPD Draft Generator")
     st.write("Upload prior-year TPD as **Microsoft Word (.docx or .doc)** to preserve fonts/colours/sizes. PDFs are supported but styles cannot be preserved.")
 
-    # 1) Upload prior TPD
     prior = st.file_uploader(
         "Upload Prior TPD (DOCX/DOC preferred; PDF supported as JSON fallback)",
         type=["docx", "doc", "pdf"],
         accept_multiple_files=False
     )
 
-    # 2) New FY
-    new_fy = st.number_input("New FY (e.g., 2024)", min_value=1990, max_value=2100, value=2024)
+    colA, colB, colC = st.columns(3)
+    with colA:
+        new_fy = st.number_input("New FY (e.g., 2024)", min_value=1990, max_value=2100, value=2024)
+    with colB:
+        report_date = st.text_input("Report date (optional, e.g., 30 June 2025)", value="")
+    with colC:
+        override_country = st.text_input("Country for auto research", value="Singapore")
 
-    # 3) Financial year end (new field)
-    fye_date = st.text_input("Financial Year End (e.g., 31 December 2024)", value="")
-
-    # 4) Country of report
-    override_country = st.text_input("Country of report (for auto research)", value="Singapore")
-
-    # 5) Information available
-    mode = st.radio("Additional information available?", [
-        "No information",
-        "Client information request",
-        "Benchmark study",
-        "Both (IRL + Benchmark)",
-    ])
-
-    bench_df: Optional[pd.DataFrame] = None
-    irl_text: Optional[str] = None
-
-    if mode in ("Benchmark study", "Both (IRL + Benchmark)"):
-        bench_file = st.file_uploader("Attach benchmark export (CSV/XLSX)", type=["csv", "xlsx"], key="bench")
-        if bench_file is not None:
-            try:
-                bench_df = pd.read_csv(bench_file) if bench_file.name.endswith(".csv") else pd.read_excel(bench_file)
-                st.caption("Loaded benchmark for inclusion in draft.")
-            except Exception as e:
-                st.error(f"Could not read benchmark: {e}")
-
-    if mode in ("Client information request", "Both (IRL + Benchmark)"):
-        irl_up = st.file_uploader("Attach client info (TXT/CSV) to insert", type=["txt", "csv"], key="irl")
-        if irl_up is not None:
-            try:
-                if irl_up.name.endswith(".csv"):
-                    _df = pd.read_csv(irl_up)
-                    irl_text = "\n".join("- " + " | ".join(map(str, row)) for _, row in _df.iterrows())
-                else:
-                    irl_text = irl_up.read().decode("utf-8", errors="ignore")
-                st.caption("Loaded client information for inclusion.")
-            except Exception as e:
-                st.error(f"Could not read client info: {e}")
-
-    # 6) Industry analysis mode
+    # Industry analysis mode
     st.subheader("Industry Analysis Mode")
     industry_mode = st.radio(
         "How should we handle Industry Analysis?",
@@ -475,8 +442,42 @@ if page == "TPD Draft":
         help="Auto-detected from prior TPD text. You can override."
     )
 
-    # 7) Industry sources
+    # Additional information options
+    mode = st.radio("Additional information available?", [
+        "No information",
+        "Client information request",
+        "Benchmark study",
+        "Both (IRL + Benchmark)",
+    ])
+
+    bench_df: Optional[pd.DataFrame] = None
+    irl_text: Optional[str] = None
+
+    if mode in ("Benchmark study", "Both (IRL + Benchmark)"):
+        bench_file = st.file_uploader("Attach benchmark export (CSV/XLSX)", type=["csv", "xlsx"], key="bench")
+        if bench_file is not None:
+            try:
+                bench_df = pd.read_csv(bench_file) if bench_file.name.endswith(".csv") else pd.read_excel(bench_file)
+                st.caption("Loaded benchmark for inclusion in draft.")
+            except Exception as e:
+                st.error(f"Could not read benchmark: {e}")
+
+    if mode in ("Client information request", "Both (IRL + Benchmark)"):
+        irl_up = st.file_uploader("Attach client info (TXT/CSV) to insert", type=["txt", "csv"], key="irl")
+        if irl_up is not None:
+            try:
+                if irl_up.name.endswith(".csv"):
+                    _df = pd.read_csv(irl_up)
+                    irl_text = "\n".join("- " + " | ".join(map(str, row)) for _, row in _df.iterrows())
+                else:
+                    irl_text = irl_up.read().decode("utf-8", errors="ignore")
+                st.caption("Loaded client information for inclusion.")
+            except Exception as e:
+                st.error(f"Could not read client info: {e}")
+
+    # Open-ended sources: user URLs + uploaded reports (we will cite titles/URLs)
     st.subheader("Industry sources (optional)")
+    st.write("We will auto-research official stats by default (World Bank). You can also add specific URLs and upload reports.")
     urls = st.text_area("Extra source URLs (one per line, optional)", value="")
     user_url_list = [u.strip() for u in urls.splitlines() if u.strip()]
     user_reports = st.file_uploader("Upload market/industry reports (PDF/DOCX/TXT — optional)", type=["pdf","docx","txt"], accept_multiple_files=True)
@@ -487,11 +488,146 @@ if page == "TPD Draft":
         st.write('Example: {"{{ENTITY}}": "ABC Pte Ltd", "{{COUNTRY}}": "Singapore"}')
         repl_json = st.text_area("Key-value JSON (optional)", value="")
 
-    # --- Generate draft (same as before) ---
     if st.button("Generate TPD draft now", type="primary"):
-        # [generation logic stays unchanged below...]
-        ...
+        if prior is None:
+            st.error("Please upload a prior TPD (Word .docx/.doc preferred).")
+        else:
+            # 1) Auto sector research tailored to chosen industry (default credible source)
+            sector_pack = auto_sector_research(override_country, industry_choice)
+            auto_lines, auto_foots = format_sector_update_text(sector_pack)
 
+            # 2) Parse advanced replacements
+            user_repl: Dict[str, str] = {}
+            if repl_json.strip():
+                try:
+                    user_repl = json.loads(repl_json)
+                    if not isinstance(user_repl, dict):
+                        st.warning("Custom replacements must be a JSON object (key-value). Ignored.")
+                        user_repl = {}
+                except Exception:
+                    st.warning("Invalid JSON for custom replacements. Ignored.")
+                    user_repl = {}
+
+            # 3) Prepare DOCX/PDF flows
+            name = prior.name.lower()
+            is_docx = name.endswith(".docx") and (DocxDocument is not None)
+            is_doc = name.endswith(".doc")
+            is_pdf = name.endswith(".pdf")
+
+            prior_buffer = io.BytesIO(prior.getvalue())
+            if is_doc:
+                try:
+                    converted = convert_doc_to_docx_bytes(prior.getvalue())
+                    prior_buffer = io.BytesIO(converted)
+                    is_docx = True
+                    st.info("Converted legacy .doc file to .docx for processing.")
+                except Exception as e:
+                    st.error(str(e))
+                    is_docx = False
+
+            # 4) DOCX path (formatting preserved)
+            if is_docx:
+                if DocxDocument is None:
+                    st.error("python-docx is not available in this environment.")
+                else:
+                    doc = DocxDocument(prior_buffer)
+                    auto_repl = build_rollforward_replacements(doc, int(new_fy), report_date.strip())
+                    auto_repl.update(user_repl)
+                    hits = docx_replace_text_everywhere(doc, auto_repl)
+
+                    # Conditional inserts
+                    if bench_df is not None and not bench_df.empty:
+                        acc = (bench_df.get("Decision", "").astype(str).str.lower() == "accept").sum()
+                        rej = (bench_df.get("Decision", "").astype(str).str.lower() == "reject").sum()
+                        summary = f"Vendor study summary: {acc} accepted, {rej} rejected, {len(bench_df)} total comparables."
+                        p = doc.add_paragraph()
+                        p.add_run("\nEconomic Analysis — Benchmark Update: ").bold = True
+                        doc.add_paragraph(summary)
+
+                    if irl_text:
+                        p = doc.add_paragraph()
+                        p.add_run("\nClient Information Provided:").bold = True
+                        for line in irl_text.splitlines():
+                            if line.strip():
+                                doc.add_paragraph("• " + line.strip())
+
+                    # --- Industry Update (mode-aware) ---
+                    doc.add_paragraph()
+                    doc.add_paragraph(f"Industry Update — {industry_choice}")
+
+                    # In Roll-forward mode: add concise “updates only” preface
+                    if industry_mode.startswith("Roll-forward"):
+                        doc.add_paragraph("The prior-year narrative is retained. The facts and figures below are refreshed for the current period:")
+
+                    # Auto lines from credible defaults (World Bank)
+                    if auto_lines:
+                        for ln in auto_lines:
+                            doc.add_paragraph(f"- {ln}")
+
+                    # User URLs appended (titles + footnotes)
+                    foots: List[Tuple[int, str]] = []
+                    if auto_foots:
+                        foots.extend(auto_foots)
+
+                    if user_url_list:
+                        for u in user_url_list:
+                            title = fetch_title(u)
+                            doc.add_paragraph(f"- See: {title}")
+                            foots.append((len(foots) + 1, u))
+
+                    # Uploaded reports: list them as sources (we’re not parsing content in this open-ended version)
+                    if user_reports:
+                        for f in user_reports:
+                            label = getattr(f, "name", "uploaded report")
+                            doc.add_paragraph(f"- See: {label}")
+                            foots.append((len(foots) + 1, f"uploaded://{label}"))
+
+                    if foots:
+                        doc.add_paragraph("Sources:")
+                        for i, url in foots:
+                            doc.add_paragraph(f"  ^{i} {url}")
+
+                    out = io.BytesIO(); doc.save(out); out.seek(0)
+                    st.download_button(
+                        "Download Draft (DOCX)",
+                        data=out.getvalue(),
+                        file_name="TPD_Draft.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+                    st.success(f"Draft generated. Replacements applied: {hits}")
+
+            # 5) PDF path (JSON fallback)
+            elif is_pdf:
+                text = read_pdf(prior_buffer)
+                payload = {
+                    "note": "PDF input: style not preserved. Upload .docx to keep formatting.",
+                    "new_fy": int(new_fy),
+                    "report_date": report_date.strip(),
+                    "industry": industry_choice,
+                    "country": override_country,
+                    "analysis_mode": industry_mode,
+                    "auto_research": {"lines": auto_lines, "sources": [u for _, u in auto_foots]},
+                    "irl": irl_text,
+                }
+                if bench_df is not None and not bench_df.empty:
+                    acc = (bench_df.get("Decision", "").astype(str).str.lower() == "accept").sum()
+                    rej = (bench_df.get("Decision", "").astype(str).str.lower() == "reject").sum()
+                    payload["benchmark_summary"] = f"{acc} accepted, {rej} rejected, {len(bench_df)} total"
+                if user_url_list:
+                    payload["user_sources"] = user_url_list
+                if user_reports:
+                    payload["uploaded_reports"] = [getattr(f, "name", "report") for f in user_reports]
+
+                st.download_button(
+                    "Download Draft (JSON)",
+                    data=json.dumps(payload, indent=2).encode("utf-8"),
+                    file_name="TPD_Draft.json",
+                    mime="application/json",
+                )
+                st.info("To preserve fonts/colours, please upload a Word .docx file.")
+
+            else:
+                st.error("Unsupported file type. Please upload .docx, .doc, or .pdf.")
 
 # ==========================
 # Other pages (kept simple)
